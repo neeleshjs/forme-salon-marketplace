@@ -1,0 +1,6 @@
+server/.env
+server/data/*.json
+server/data/tenants/
+server/node_modules/
+client/node_modules/
+*.log
