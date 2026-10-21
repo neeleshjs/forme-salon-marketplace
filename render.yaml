@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: forme-salon-marketplace
+    runtime: node
+    plan: free
+    buildCommand: npm --prefix server ci
+    startCommand: npm --prefix server start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DEMO_OWNER_PASSWORD
+        generateValue: true
+      - key: DEMO_OWNER_EMAIL
+        value: owner@forme.studio
+      - key: PORT
+        value: 10000

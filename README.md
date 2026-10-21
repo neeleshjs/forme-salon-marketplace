@@ -11,6 +11,12 @@ A responsive salon marketplace website with location-led salon discovery, rating
 5. Open `http://localhost:5050`.
 6. Choose **Owner login**. Demo access: `owner@forme.studio` / `forme-demo-2026`.
 
+## Host a public demo
+
+This repository includes a Render Blueprint for a free Node web service. Once the repository is on GitHub, connect it in Render and create the service from `render.yaml`. The service serves the customer website and API from the same URL. Render generates a session secret and demo owner password for the hosted instance; inspect the service environment in Render if you need owner dashboard access.
+
+The free demo uses local JSON files and has no persistent disk, so bookings, accounts, reviews, and salon data can reset when the service restarts or redeploys. Razorpay is not configured by default, so deposits use the labeled demo payment flow. Use a persistent database and configure a payment provider before relying on it for real customers.
+
 The first start creates the demo owner and FORME location in `server/data/platform.json`. Salon records are stored separately under `server/data/tenants/`; FORME's original demo records remain in `server/data/studio.json`. These local JSON files, `.env`, and `node_modules` are ignored by Git.
 
 ## Salon partner workflow
