@@ -1,4 +1,4 @@
-const API_BASE = window.BARBER_API_URL || 'http://localhost:5050';
+const API_BASE = window.BARBER_API_URL || window.location.origin;
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 let currentCurrency = 'INR'; let currentLocale = 'en-IN'; let currentTimeZone = 'Asia/Kolkata';
