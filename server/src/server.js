@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { randomUUID, randomBytes, timingSafeEqual, createHmac, scryptSync } from 'node:crypto';
+import { randomUUID, randomBytes, randomInt, timingSafeEqual, createHmac, scryptSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
@@ -116,7 +116,14 @@ async function writePlatform(platform) {
   await fs.rename(temp, platformFile);
 }
 async function readPlatform() {
-  try { const platform = JSON.parse(await fs.readFile(platformFile, 'utf8')); platform.customerUsers ||= []; return platform; }
+  try {
+    const platform = JSON.parse(await fs.readFile(platformFile, 'utf8')); platform.customerUsers ||= []; platform.registrationChallenges ||= []; platform.otpSendHistory ||= [];
+    const now = Date.now(); const challengeCount = platform.registrationChallenges.length; const historyCount = platform.otpSendHistory.length;
+    platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.expiresAt > now);
+    platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
+    if (challengeCount !== platform.registrationChallenges.length || historyCount !== platform.otpSendHistory.length) await writePlatform(platform);
+    return platform;
+  }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
     const email = normalizeEmail(process.env.DEMO_OWNER_EMAIL || 'owner@forme.studio');
@@ -124,7 +131,7 @@ async function readPlatform() {
     const credentials = hashPassword(password);
     const owner = { id: randomUUID(), name: 'FORME Owner', email, passwordSalt: credentials.salt, passwordHash: credentials.hash, tenantIds: ['forme-tenant'], createdAt: new Date().toISOString() };
     const defaultPlatform = {
-      users: [owner], customerUsers: [],
+      users: [owner], customerUsers: [], registrationChallenges: [], otpSendHistory: [],
       tenants: [{ id: 'forme-tenant', slug: 'forme', name: 'FORME Barber Studio', ownerUserId: owner.id, userIds: [owner.id], createdAt: new Date().toISOString(), active: true, branches: [{ id: 'main', name: 'Main Studio', slug: 'forme-main', city: '', country: 'India', countryCode: 'IN', currency: 'INR', timeZone: 'Asia/Kolkata', locale: 'en-IN', latitude: null, longitude: null, isDefault: true, active: true }] }],
     };
     await writePlatform(defaultPlatform);
@@ -201,6 +208,56 @@ function wallTimeInZone(date, time, timeZone) {
 function todayInZone(timeZone) { return dateKeyInZone(new Date(), timeZone); }
 function weekdayFromDate(date) { const [year, month, day] = date.split('-').map(Number); return new Date(Date.UTC(year, month - 1, day, 12)).getUTCDay(); }
 function validPhone(phone) { return typeof phone === 'string' && /^[+\d][\d\s()-]{7,18}$/.test(phone.trim()); }
+function normalizeOtpPhone(value) {
+  const raw = String(value || '').trim(); let digits = raw.replace(/\D/g, '');
+  if (!raw.startsWith('+') && digits.length === 10) digits = `${String(process.env.OTP_DEFAULT_COUNTRY_CODE || '91').replace(/\D/g, '')}${digits}`;
+  if (!/^[1-9]\d{7,14}$/.test(digits)) throw new Error('Enter a phone number with country code, for example +91 98765 43210.');
+  return { e164: `+${digits}`, digits };
+}
+function otpConfigurationReady() {
+  return Boolean(process.env.RESEND_API_KEY && process.env.OTP_EMAIL_FROM && process.env.MSG91_AUTH_KEY && process.env.MSG91_OTP_TEMPLATE_ID);
+}
+function maskedEmail(email) { const [name, domain] = email.split('@'); return `${name.slice(0, 1)}${'*'.repeat(Math.max(2, name.length - 1))}@${domain}`; }
+function maskedPhone(phone) { return `${phone.slice(0, 3)}${'*'.repeat(Math.max(4, phone.length - 7))}${phone.slice(-4)}`; }
+function hashOtp(challengeId, channel, value) { return createHmac('sha256', sessionSecret).update(`${challengeId}:${channel}:${value}`).digest(); }
+function otpMatches(challengeId, channel, value, expectedHex) {
+  const actual = hashOtp(challengeId, channel, String(value || ''));
+  let expected; try { expected = Buffer.from(expectedHex || '', 'hex'); } catch { return false; }
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+async function sendVerificationEmail(email, code) {
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.OTP_EMAIL_FROM, to: [email], subject: 'Your FORME verification code', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Verify your FORME account</h2><p>Your email verification code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request it, you can ignore this email.</p></div>` }) });
+  if (!response.ok) throw new Error('Email delivery failed.');
+}
+async function sendVerificationSms(phone, code) {
+  const response = await fetch('https://control.msg91.com/api/v5/flow', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { authkey: process.env.MSG91_AUTH_KEY, accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ template_id: process.env.MSG91_OTP_TEMPLATE_ID, short_url: '0', recipients: [{ mobiles: phone.replace('+', ''), VAR1: code }] }) });
+  if (!response.ok) throw new Error('SMS delivery failed.');
+  const result = await response.json().catch(() => ({}));
+  if (String(result.type || '').toLowerCase() === 'error' || String(result.status || '').toLowerCase() === 'error') throw new Error('SMS delivery failed.');
+}
+async function startRegistrationVerification(platform, { purpose, email, phone, registration }) {
+  if (!otpConfigurationReady()) return { status: 503, error: 'Signup verification is not configured yet. Please contact the salon platform administrator.' };
+  const now = Date.now(); platform.registrationChallenges ||= []; platform.otpSendHistory ||= [];
+  platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
+  const recent = platform.otpSendHistory.filter((item) => item.email === email || item.phone === phone);
+  if (recent.some((item) => now - item.createdAt < 60 * 1000)) return { status: 429, error: 'Please wait one minute before requesting another code.' };
+  if (recent.length >= 3) return { status: 429, error: 'Too many codes were requested. Please try again in an hour.' };
+  const challengeId = randomUUID(); const emailCode = String(randomInt(100000, 1000000)); const phoneCode = String(randomInt(100000, 1000000));
+  platform.registrationChallenges = platform.registrationChallenges.filter((item) => !(item.purpose === purpose && item.email === email) && item.expiresAt > now);
+  const challengeRecord = { id: challengeId, purpose, email, phone, emailOtpHash: hashOtp(challengeId, 'email', emailCode).toString('hex'), phoneOtpHash: hashOtp(challengeId, 'phone', phoneCode).toString('hex'), registration, attempts: 0, expiresAt: now + 10 * 60 * 1000, createdAt: now };
+  platform.registrationChallenges.push(challengeRecord); platform.otpSendHistory.push({ email, phone, createdAt: now }); await writePlatform(platform);
+  try { await Promise.all([sendVerificationEmail(email, emailCode), sendVerificationSms(phone, phoneCode)]); }
+  catch { platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.id !== challengeId); await writePlatform(platform); return { status: 502, error: 'We could not deliver both verification codes. Check the email and phone number, then try again shortly.' }; }
+  return { status: 200, challengeId, emailHint: maskedEmail(email), phoneHint: maskedPhone(phone), expiresInSeconds: 600 };
+}
+async function verifyRegistrationCodes(platform, { challengeId, purpose, emailCode, phoneCode }) {
+  platform.registrationChallenges ||= []; const challenge = platform.registrationChallenges.find((item) => item.id === challengeId && item.purpose === purpose);
+  if (!challenge || challenge.expiresAt <= Date.now() || challenge.attempts >= 5) return { error: 'These codes are invalid or expired. Request new codes and try again.' };
+  challenge.attempts += 1;
+  const valid = otpMatches(challenge.id, 'email', emailCode, challenge.emailOtpHash) && otpMatches(challenge.id, 'phone', phoneCode, challenge.phoneOtpHash);
+  if (!valid) { await writePlatform(platform); return { error: 'The email or SMS code is incorrect.' }; }
+  return { challenge };
+}
 function byStart(a, b) { return `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`); }
 function getService(state, id) { return state.services.find((item) => item.id === id && item.active); }
 function getStaff(state, id) { return id ? state.staff.find((item) => item.id === id && item.active) : null; }
@@ -270,8 +327,23 @@ app.post('/api/customer/register', async (req, res, next) => {
     const { name, email, phone, password } = req.body || {}; const normalized = normalizeEmail(email);
     if (typeof name !== 'string' || name.trim().length < 2 || !/^\S+@\S+\.\S+$/.test(normalized) || !validPhone(String(phone || '')) || typeof password !== 'string' || password.length < 8) return res.status(400).json({ error: 'Enter your name, valid email, phone, and a password with at least 8 characters.' });
     const platform = await readPlatform(); if (platform.customerUsers.some((user) => user.email === normalized)) return res.status(409).json({ error: 'An account already exists for this email. Please sign in.' });
-    const credentials = hashPassword(password); const user = { id: randomUUID(), name: name.trim().slice(0, 80), email: normalized, phone: String(phone).trim().slice(0, 24), passwordSalt: credentials.salt, passwordHash: credentials.hash, createdAt: new Date().toISOString(), active: true };
-    platform.customerUsers.push(user); await writePlatform(platform); res.status(201).json({ customerToken: makeCustomerSession(user), customer: { id: user.id, name: user.name, email: user.email, phone: user.phone } });
+    let smsPhone; try { smsPhone = normalizeOtpPhone(phone).e164; } catch (error) { return res.status(400).json({ error: error.message }); }
+    const credentials = hashPassword(password);
+    const result = await startRegistrationVerification(platform, { purpose: 'customer', email: normalized, phone: smsPhone, registration: { name: name.trim().slice(0, 80), email: normalized, phone: smsPhone, passwordSalt: credentials.salt, passwordHash: credentials.hash } });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    const { status, ...challenge } = result; res.status(202).json(challenge);
+  } catch (e) { next(e); }
+});
+app.post('/api/customer/verify-registration', async (req, res, next) => {
+  try {
+    const platform = await readPlatform(); const result = await verifyRegistrationCodes(platform, { challengeId: String(req.body?.challengeId || ''), purpose: 'customer', emailCode: String(req.body?.emailCode || ''), phoneCode: String(req.body?.smsCode || '') });
+    if (result.error) return res.status(400).json({ error: result.error });
+    const { challenge } = result; const data = challenge.registration;
+    if (platform.customerUsers.some((user) => user.email === data.email)) return res.status(409).json({ error: 'An account already exists for this email. Please sign in.' });
+    const verifiedAt = new Date().toISOString();
+    const user = { id: randomUUID(), name: data.name, email: data.email, phone: data.phone, passwordSalt: data.passwordSalt, passwordHash: data.passwordHash, emailVerifiedAt: verifiedAt, phoneVerifiedAt: verifiedAt, createdAt: verifiedAt, active: true };
+    platform.customerUsers.push(user); platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.id !== challenge.id); await writePlatform(platform);
+    res.status(201).json({ customerToken: makeCustomerSession(user), customer: { id: user.id, name: user.name, email: user.email, phone: user.phone } });
   } catch (e) { next(e); }
 });
 app.post('/api/customer/login', async (req, res, next) => {
@@ -286,14 +358,34 @@ app.get('/api/customer/me', async (req, res, next) => {
 });
 app.post('/api/auth/register', async (req, res, next) => {
   try {
-    const { name, email, password } = req.body || {};
-    if (typeof name !== 'string' || name.trim().length < 2 || !/^\S+@\S+\.\S+$/.test(normalizeEmail(email)) || typeof password !== 'string' || password.length < 8) return res.status(400).json({ error: 'Enter your name, a valid email, and a password with at least 8 characters.' });
-    const platform = await readPlatform(); const normalized = normalizeEmail(email); let user = platform.users.find((u) => u.email === normalized);
-    if (user && !passwordMatches(password, user)) return res.status(409).json({ error: 'This email already has an account. Sign in with its password to add another salon.' });
-    if (!user) { const credentials = hashPassword(password); user = { id: randomUUID(), name: name.trim().slice(0, 80), email: normalized, passwordSalt: credentials.salt, passwordHash: credentials.hash, tenantIds: [], createdAt: new Date().toISOString() }; platform.users.push(user); }
-    user.tenantIds ||= [];
-    const { tenant, branch } = await createTenantForUser(platform, user, req.body || {});
-    await writePlatform(platform);
+    const { name, email, phone, password } = req.body || {}; const normalized = normalizeEmail(email);
+    if (typeof name !== 'string' || name.trim().length < 2 || !/^\S+@\S+\.\S+$/.test(normalized) || !validPhone(String(phone || '')) || typeof password !== 'string' || password.length < 8) return res.status(400).json({ error: 'Enter your name, a valid email, phone number, and a password with at least 8 characters.' });
+    const details = req.body || {}; const businessName = String(details.businessName || '').trim(); const branchName = String(details.branchName || 'Main branch').trim(); const country = String(details.country || '').trim(); const currency = String(details.currency || 'USD').trim().toUpperCase(); const timeZone = String(details.timeZone || 'Etc/UTC').trim();
+    if (businessName.length < 2 || branchName.length < 2 || !country || !/^[A-Z]{3}$/.test(currency)) return res.status(400).json({ error: 'Enter a business name, location, country, and three-letter currency.' });
+    try { new Intl.DateTimeFormat('en', { timeZone }).format(); new Intl.NumberFormat('en', { style: 'currency', currency }).format(1); parseCoordinates(details); }
+    catch { return res.status(400).json({ error: 'Enter a valid country, currency, time zone, and map pin.' }); }
+    let smsPhone; try { smsPhone = normalizeOtpPhone(phone).e164; } catch (error) { return res.status(400).json({ error: error.message }); }
+    const platform = await readPlatform(); const existing = platform.users.find((user) => user.email === normalized);
+    if (existing && !passwordMatches(password, existing)) return res.status(409).json({ error: 'This email already has an account. Sign in with its password to add another salon.' });
+    const credentials = existing ? { salt: existing.passwordSalt, hash: existing.passwordHash } : hashPassword(password);
+    const registration = { name: existing?.name || name.trim().slice(0, 80), email: normalized, phone: smsPhone, passwordSalt: credentials.salt, passwordHash: credentials.hash, existingUserId: existing?.id || null, tenantDetails: { businessName, branchName, city: details.city, country, countryCode: details.countryCode, currency, timeZone, locale: details.locale, latitude: details.latitude, longitude: details.longitude } };
+    const result = await startRegistrationVerification(platform, { purpose: 'partner', email: normalized, phone: smsPhone, registration });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    const { status, ...challenge } = result; res.status(202).json(challenge);
+  } catch (e) { next(e); }
+});
+app.post('/api/auth/verify-registration', async (req, res, next) => {
+  try {
+    const platform = await readPlatform(); const result = await verifyRegistrationCodes(platform, { challengeId: String(req.body?.challengeId || ''), purpose: 'partner', emailCode: String(req.body?.emailCode || ''), phoneCode: String(req.body?.smsCode || '') });
+    if (result.error) return res.status(400).json({ error: result.error });
+    const { challenge } = result; const data = challenge.registration; let user = data.existingUserId ? platform.users.find((item) => item.id === data.existingUserId) : null;
+    if (data.existingUserId && !user) return res.status(409).json({ error: 'This owner account is no longer available. Please start signup again.' });
+    const conflictingUser = platform.users.find((item) => item.email === data.email && item.id !== user?.id);
+    if (conflictingUser) return res.status(409).json({ error: 'This email already has an account. Please sign in instead.' });
+    if (!user) { user = { id: randomUUID(), name: data.name, email: data.email, phone: data.phone, passwordSalt: data.passwordSalt, passwordHash: data.passwordHash, tenantIds: [], emailVerifiedAt: new Date().toISOString(), phoneVerifiedAt: new Date().toISOString(), createdAt: new Date().toISOString() }; platform.users.push(user); }
+    else { user.phone = data.phone; user.emailVerifiedAt ||= new Date().toISOString(); user.phoneVerifiedAt = new Date().toISOString(); }
+    user.tenantIds ||= []; const { tenant, branch } = await createTenantForUser(platform, user, data.tenantDetails);
+    platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.id !== challenge.id); await writePlatform(platform);
     res.status(201).json({ sessionToken: makeSession(user, tenant, branch), user: { id: user.id, name: user.name, email: user.email }, workspace: { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone }, organizations: tenantChoices(platform, user) });
   } catch (e) { if (e.message.startsWith('Enter a business') || e.message.startsWith('Choose a') || e.message.startsWith('Enter both valid map coordinates')) return res.status(400).json({ error: e.message }); next(e); }
 });
