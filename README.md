@@ -1,5 +1,7 @@
 # FORME Salon Cloud
 
+[**Open the live website**](https://forme-salon-marketplace.onrender.com)
+
 A responsive salon marketplace website with location-led salon discovery, ratings, customer accounts, online booking, and salon partner tools. It connects local customers to salons while giving salon owners a multi-brand, multi-branch operations workspace. Each branch has its own appointments, team, services, customers, stock, local time zone, and currency. Owners can switch locations from one workspace and review their portfolio across branches.
 
 ## Run locally
