@@ -666,5 +666,7 @@ app.get('/api/admin/ics/:id', async (req, res, next) => {
   try { const s = await readState(); const a = s.appointments.find((x) => x.id === req.params.id); if (!a) return res.status(404).end(); const date = a.date.replaceAll('-', ''); const time = a.time.replace(':', '') + '00'; const end = minutes(a.time) + a.minutes; const endTime = `${String(Math.floor(end / 60)).padStart(2, '0')}${String(end % 60).padStart(2, '0')}00`; res.type('text/calendar').attachment(`booking-${a.reference}.ics`).send(`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//FORME//Barber Studio//EN\r\nBEGIN:VEVENT\r\nUID:${a.id}@forme.local\r\nDTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}\r\nDTSTART:${date}T${time}\r\nDTEND:${date}T${endTime}\r\nSUMMARY:${a.serviceName} at FORME\r\nDESCRIPTION:Booking ${a.reference} with ${a.staffName}\r\nEND:VEVENT\r\nEND:VCALENDAR`); } catch (e) { next(e); }
 });
 
+app.get('*', (req, res, next) => { if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'API endpoint not found.' }); if (path.extname(req.path)) return next(); if (req.accepts('html')) return res.sendFile(path.join(clientDir, 'index.html')); next(); });
+
 app.use((error, _req, res, _next) => { console.error(error); res.status(500).json({ error: 'Something went wrong. Please try again.' }); });
 app.listen(port, () => console.log(`FORME Barber Studio listening on port ${port}`));

@@ -18,6 +18,81 @@ let posType = 'all';
 let appointmentCache = [];
 let toastTimer;
 
+function resolveRoute() {
+  const path = location.pathname.replace(/\/+$/, '') || '/';
+  const params = new URLSearchParams(location.search);
+  if (path === '/' && params.has('salon')) return { name: 'salon', slug: params.get('salon') };
+  if (path === '/') return { name: 'home' };
+  if (path === '/salons') return { name: 'salons' };
+  if (path === '/partner') return { name: 'partner' };
+  if (path === '/partner/login') return { name: 'partner-login' };
+  if (path === '/partner/signup') return { name: 'partner-signup' };
+  if (path === '/manage-booking') return { name: 'manage' };
+  if (path === '/not-found') return { name: 'not-found' };
+  const salon = path.match(/^\/salon\/([^/]+)(?:\/(booking))?$/);
+  if (salon) return { name: salon[2] ? 'booking' : 'salon', slug: decodeURIComponent(salon[1]) };
+  const studio = path.match(/^\/studio(?:\/([^/]+))?$/);
+  if (studio) {
+    const view = studio[1] || 'overview';
+    return Object.hasOwn(titles, view) ? { name: 'studio', view } : { name: 'not-found' };
+  }
+  return { name: 'not-found' };
+}
+
+function navigate(path, { replace = false } = {}) {
+  if (replace) history.replaceState({}, '', path);
+  else history.pushState({}, '', path);
+  renderRoute();
+}
+
+function renderRoute() {
+  const route = resolveRoute();
+  const publicChildren = new Set(({ home: ['platform', 'marketCategories', 'howItWorks', 'partner'], salons: ['salonDirectory'], salon: ['salonExperience'], booking: ['salonExperience'], manage: ['salonExperience'], partner: ['partner'], 'not-found': ['notFound'] })[route.name] || []);
+  $$('main#top > section').forEach(section => { section.hidden = !publicChildren.has(section.id); });
+  const privatePage = ['partner-login', 'partner-signup', 'studio'].includes(route.name);
+  $('#siteFooter').hidden = ['partner-login', 'partner-signup', 'studio', 'not-found'].includes(route.name);
+  $('#adminShell').hidden = !privatePage;
+  document.body.style.overflow = privatePage ? 'hidden' : '';
+  $('#adminGate').hidden = route.name === 'studio' && Boolean(sessionStorage.getItem(tokenKey));
+  $('#dashboard').hidden = route.name !== 'studio' || !sessionStorage.getItem(tokenKey);
+  document.body.dataset.page = route.name;
+
+  const salonPage = ['salon', 'booking', 'manage'].includes(route.name);
+  $('#salonExperience').hidden = !salonPage;
+  const salonSections = ['.salon-experience > .hero', '#services', '#experience', '#booking', '#manageBooking'];
+  salonSections.forEach(selector => { const node = $(selector); if (node) node.hidden = true; });
+  if (route.name === 'salon') ['.salon-experience > .hero', '#services', '#experience'].forEach(selector => { $(selector).hidden = false; });
+  if (route.name === 'booking') $('#booking').hidden = false;
+  if (route.name === 'manage') $('#manageBooking').hidden = false;
+
+  if (route.slug) publicContext.salon = route.slug;
+  const params = new URLSearchParams(location.search);
+  if (params.has('salon')) publicContext.salon = params.get('salon') || publicContext.salon;
+  if (params.has('branch')) publicContext.branch = params.get('branch') || '';
+  else if (route.slug && !directSalonLink) publicContext.branch = '';
+
+  if (route.name === 'home') document.title = 'FORME - Find your salon';
+  else if (route.name === 'salons') {
+    document.title = 'Explore salons - FORME';
+    $('#salonSearch').value = params.get('q') || '';
+    $('#marketLocation').value = params.get('city') || '';
+    loadSalonDirectory($('#salonSearch').value.trim());
+  } else if (route.name === 'partner') document.title = 'For salon partners - FORME';
+  else if (route.name === 'salon' || route.name === 'booking') loadPublicData();
+  else if (route.name === 'manage') document.title = 'Manage booking - FORME';
+  else if (route.name === 'partner-login' || route.name === 'partner-signup') {
+    document.title = route.name === 'partner-signup' ? 'Create salon workspace - FORME' : 'Partner sign in - FORME';
+    openAdmin(route.name === 'partner-signup');
+    if (route.name === 'partner-signup') setAuthMode('register');
+  } else if (route.name === 'studio') {
+    document.title = 'Studio workspace - FORME';
+    if (sessionStorage.getItem(tokenKey)) showView(route.view);
+    else setAuthMode('login');
+  } else if (route.name === 'not-found') document.title = 'Page not found - FORME';
+}
+
+window.addEventListener('popstate', renderRoute);
+
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
@@ -37,12 +112,15 @@ async function loadPublicData() {
   try {
     const [profile, serviceList, staffList, ratingData] = await Promise.all([api('/api/salon/profile'), api('/api/services'), api('/api/staff'), api('/api/reviews')]);
     currentCurrency = profile.branch.currency || 'INR'; currentLocale = profile.branch.locale || 'en-IN'; currentTimeZone = profile.branch.timeZone || 'Asia/Kolkata'; services = serviceList; staff = staffList; $('#salonRatingSummary').textContent = ratingData.ratingCount ? `★ ${ratingData.averageRating} · ${ratingData.ratingCount} verified review${ratingData.ratingCount===1?'':'s'}` : 'New salon · be the first to rate';
-    $('#salonExperience').hidden = false; document.title = `${profile.tenantName} · ${profile.branch.name}`;
+    $('#salonExperience').hidden = false; document.title = `${profile.tenantName} - ${profile.branch.name} - FORME`; $('#manageBookingLink').href = `/manage-booking?salon=${encodeURIComponent(publicContext.salon)}&branch=${encodeURIComponent(profile.branch.id)}`; $('.hero-copy .button').href = `/salon/${encodeURIComponent(publicContext.salon)}/booking?branch=${encodeURIComponent(profile.branch.id)}`;
     $('#dateInput').value = localDate(); $('#manageDate').value = localDate();
     $('#serviceGrid').innerHTML = services.map((s, i) => `<article class="service-card"><span class="service-number">0${i + 1} / ${s.minutes} MIN</span><h3>${escapeHtml(s.name)}</h3><p>${escapeHtml(s.description)}</p><div class="service-bottom"><strong>${money(s.price)}</strong><span>${escapeHtml(s.category)}</span></div></article>`).join('');
     $('#serviceSelect').innerHTML = '<option value="">Choose a service</option>' + services.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)} — ${s.minutes} min · ${money(s.price)}</option>`).join('');
     $('#staffSelect').innerHTML = '<option value="">Any available barber</option>' + staff.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)} · ${escapeHtml(s.role)}</option>`).join('');
-  } catch (error) { $('#serviceGrid').innerHTML = `<p class="loading">${escapeHtml(error.message)}</p>`; }
+  } catch (error) {
+    if (error.message === 'Salon location not found.') { navigate('/not-found', { replace: true }); return; }
+    $('#serviceGrid').innerHTML = `<p class="loading">${escapeHtml(error.message)}</p>`;
+  }
 }
 
 async function refreshAvailableTimes({ preserve = false } = {}) {
@@ -130,22 +208,21 @@ $('#manageDate').addEventListener('change', async () => {
 });
 
 function openAdmin(create = false) { $('#adminShell').hidden = false; document.body.style.overflow = 'hidden'; addingOrganization = Boolean(create && sessionStorage.getItem(tokenKey)); setAuthMode(create ? 'register' : 'login'); if (sessionStorage.getItem(tokenKey) && !addingOrganization) resumeSession(); }
-function closeAdmin() { $('#adminShell').hidden = true; document.body.style.overflow = ''; }
+function closeAdmin() { document.body.style.overflow = ''; navigate('/'); }
 function setAuthMode(mode) { authMode = mode; const creating = mode === 'register'; $('#authTitle').textContent = addingOrganization ? 'Add another salon brand.' : creating ? 'Open your salon workspace.' : 'Welcome back.'; $('#authIntro').textContent = addingOrganization ? 'Create another brand under your owner account.' : creating ? 'Create your owner account and first location.' : 'Sign in to your salon workspace.'; $('#authCreateFields').hidden = !creating; $('#ownerNameLabel').hidden = addingOrganization; $('#adminLogin').querySelector('[name="name"]').required = creating && !addingOrganization; $('#authToggle').hidden = addingOrganization; $('#adminLogin [name="email"]').required = !addingOrganization; $('#adminLogin [name="password"]').required = !addingOrganization; $('#adminLogin [name="password"]').minLength = addingOrganization ? 0 : 8; $('#adminLogin [name="email"]').closest('label').hidden = addingOrganization; $('#adminLogin [name="password"]').closest('label').hidden = addingOrganization; $('#authToggle').textContent = creating ? 'Already have a workspace? Sign in' : 'New to FORME? Create a salon account'; $('#authSubmit').textContent = addingOrganization ? 'Add salon brand' : creating ? 'Create salon workspace' : 'Sign in'; $('#workspaceChooser').hidden = true; $('#adminLogin').querySelector('[name="country"]').required = creating; $('#adminLogin').querySelector('[name="timeZone"]').required = creating; $('#adminLogin').querySelector('[name="businessName"]').required = creating; $('#adminLogin').querySelector('[name="branchName"]').required = creating; showMessage($('#adminMessage'), ''); }
 async function resumeSession() { try { const info = await api('/api/auth/me'); activeUser=info.user; activeWorkspace=info.workspace; organizations=info.organizations; await finishWorkspace(); } catch { sessionStorage.removeItem(tokenKey); } }
-async function finishWorkspace() { $('#adminGate').hidden = true; $('#dashboard').hidden = false; $('#userAvatar').textContent = (activeUser?.name || 'F')[0].toUpperCase(); renderWorkspaceSelectors(); applyWorkspaceLocale(); enterDashboard(); }
+async function finishWorkspace() { $('#adminGate').hidden = true; $('#dashboard').hidden = false; $('#userAvatar').textContent = (activeUser?.name || 'F')[0].toUpperCase(); renderWorkspaceSelectors(); applyWorkspaceLocale(); const bookingUrl=`/salon/${encodeURIComponent(activeWorkspace.tenantSlug)}/booking?branch=${encodeURIComponent(activeWorkspace.branchId)}`; $('#studioBookingLink').href=bookingUrl; $('#studioNewBookingLink').href=bookingUrl; const route=resolveRoute(); if(route.name!=='studio') navigate('/studio/overview'); else enterDashboard(); }
 function applyWorkspaceLocale() { const org=organizations.find(o=>o.id===activeWorkspace?.tenantId); const branch=org?.branches.find(b=>b.id===activeWorkspace?.branchId); if(!branch)return; currentCurrency=branch.currency||'INR';currentTimeZone=branch.timeZone||'Etc/UTC';currentLocale=({INR:'en-IN',USD:'en-US',GBP:'en-GB',EUR:'en-IE',AED:'en-AE',SGD:'en-SG',CAD:'en-CA',AUD:'en-AU'})[currentCurrency]||'en'; $('#dateInput').value=localDate();$('#manageDate').value=localDate(); }
 function renderWorkspaceSelectors() { const org=$('#orgSelector'), branch=$('#branchSelector'); if (!org || !branch || !activeWorkspace) return; org.innerHTML=organizations.map(o=>`<option value="${escapeHtml(o.id)}" ${o.id===activeWorkspace.tenantId?'selected':''}>${escapeHtml(o.name)}</option>`).join(''); const selected=organizations.find(o=>o.id===activeWorkspace.tenantId); branch.innerHTML=(selected?.branches||[]).map(b=>`<option value="${escapeHtml(b.id)}" ${b.id===activeWorkspace.branchId?'selected':''}>${escapeHtml(b.name)}${b.city?` · ${escapeHtml(b.city)}`:''}</option>`).join(''); }
 async function changeWorkspace(tenantId, branchId) { const org=organizations.find(o=>o.id===tenantId); const branch=(org?.branches||[]).find(b=>b.id===branchId); if(!branch)return; try { const result=await api('/api/auth/switch-context',{method:'POST',body:JSON.stringify({tenantId,branchId})}); sessionStorage.setItem(tokenKey,result.sessionToken); activeWorkspace=result.workspace; await resumeSession(); notify(`Switched to ${branch.name}.`); } catch(e){ notify(e.message,true); renderWorkspaceSelectors(); } }
-$('#adminOpen').addEventListener('click', () => openAdmin(false)); $('#createSalonOpen').addEventListener('click', () => openAdmin(true));
+
 $('#adminClose').addEventListener('click', closeAdmin); $('#adminShell').addEventListener('click', (e) => { if (e.target === $('#adminShell')) closeAdmin(); });
-$('#authToggle').addEventListener('click', () => setAuthMode(authMode === 'login' ? 'register' : 'login'));
+$('#authToggle').addEventListener('click', () => navigate(authMode === 'login' ? '/partner/signup' : '/partner/login'));
 $('#adminLogout').addEventListener('click', () => { sessionStorage.removeItem(tokenKey); activeUser=null;activeWorkspace=null; $('#dashboard').hidden=true;$('#adminGate').hidden=false;$('#adminLogin').reset();setAuthMode('login');showMessage($('#adminMessage'),'You’re signed out.'); });
 $('#adminLogin').addEventListener('submit', async (event) => { event.preventDefault(); const form=event.currentTarget;const payload=Object.fromEntries(new FormData(form));showMessage($('#adminMessage'),authMode==='register'?'Creating your salon workspace…':'Signing you in…'); try { if(authMode==='register'){if(addingOrganization){const result=await api('/api/auth/create-organization',{method:'POST',body:JSON.stringify(payload)});sessionStorage.setItem(tokenKey,result.sessionToken);activeWorkspace=result.workspace;const info=await api('/api/auth/me');activeUser=info.user;organizations=info.organizations;addingOrganization=false;await finishWorkspace();return;}const result=await api('/api/auth/register',{method:'POST',body:JSON.stringify(payload)});sessionStorage.setItem(tokenKey,result.sessionToken);activeUser=result.user;activeWorkspace=result.workspace;organizations=result.organizations;await finishWorkspace();return;} const result=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email:payload.email,password:payload.password})});activeUser=result.user;organizations=result.organizations;pendingLoginToken=result.loginToken;const choices=organizations.flatMap(o=>o.branches.map(b=>({tenantId:o.id,branchId:b.id,label:`${o.name} · ${b.name}${b.city?`, ${b.city}`:''}`}))); if(choices.length===1){const choice=choices[0];const selected=await api('/api/auth/select',{method:'POST',body:JSON.stringify({loginToken:pendingLoginToken,...choice})});sessionStorage.setItem(tokenKey,selected.sessionToken);activeWorkspace=selected.workspace;organizations=selected.organizations;await finishWorkspace();}else{$('#workspaceChoice').innerHTML=choices.map((x,i)=>`<option value="${i}">${escapeHtml(x.label)}</option>`).join('');$('#workspaceChoice').dataset.choices=JSON.stringify(choices);$('#workspaceChooser').hidden=false;showMessage($('#adminMessage'),'Choose which salon location to open.');} } catch(error){showMessage($('#adminMessage'),error.message,true);} });
 $('#workspaceContinue').addEventListener('click',async()=>{try{const choice=JSON.parse($('#workspaceChoice').dataset.choices||'[]')[Number($('#workspaceChoice').value)];const result=await api('/api/auth/select',{method:'POST',body:JSON.stringify({loginToken:pendingLoginToken,tenantId:choice.tenantId,branchId:choice.branchId})});sessionStorage.setItem(tokenKey,result.sessionToken);activeWorkspace=result.workspace;organizations=result.organizations;await finishWorkspace();}catch(e){showMessage($('#adminMessage'),e.message,true);}});
 $('#orgSelector').addEventListener('change',()=>{const org=organizations.find(o=>o.id===$('#orgSelector').value);if(org?.branches[0])changeWorkspace(org.id,org.branches[0].id);});$('#branchSelector').addEventListener('change',()=>changeWorkspace($('#orgSelector').value,$('#branchSelector').value));
 $('#addOrganization').addEventListener('click',()=>openAdmin(true));
-function enterDashboard() { $('#adminGate').hidden = true; $('#dashboard').hidden = false; showView('overview'); }
 function enterDashboard() { $('#adminGate').hidden = true; $('#dashboard').hidden = false; showView('overview'); }
 const titles = { overview: 'Today at the studio', appointments: 'Appointments', pos: 'Point of sale', customers: 'Customer book', inventory: 'Products & stock', reports: 'Studio reports', team: 'Team & hours', settings: 'Studio settings' };
 function showView(view) {
@@ -155,8 +232,8 @@ function showView(view) {
   const loaders = { overview: loadOverview, appointments: loadAppointments, pos: loadPos, customers: loadCustomers, inventory: loadInventory, reports: loadReports, team: loadTeam, settings: loadSettings };
   loaders[view]?.().catch((error) => notify(error.message, true));
 }
-$$('.dash-nav button').forEach((button) => button.addEventListener('click', () => showView(button.dataset.view)));
-$$('[data-go]').forEach((button) => button.addEventListener('click', () => showView(button.dataset.go)));
+$$('.dash-nav button').forEach((button) => button.addEventListener('click', () => navigate(`/studio/${button.dataset.view}`)));
+$$('[data-go]').forEach((button) => button.addEventListener('click', () => navigate(`/studio/${button.dataset.go}`)));
 
 async function loadOverview() {
   const [overview, products] = await Promise.all([api('/api/admin/overview'), api('/api/admin/products')]);
@@ -300,15 +377,26 @@ $('#settingsForm').addEventListener('submit', async (event) => {
 });
 $('#addService').addEventListener('click', async () => { const name = prompt('Service name'); if (!name) return; const price = Number(prompt('Price (₹)', '299')); const duration = Number(prompt('Duration in minutes', '30')); const category = prompt('Category', 'Hair') || 'Hair'; const description = prompt('Short description', '') || ''; try { await api('/api/admin/services', { method: 'POST', body: JSON.stringify({ name, price, minutes: duration, category, description }) }); notify('New service published.'); await loadSettings(); } catch (e) { notify(e.message, true); } });
 
-loadPublicData();
-
 let nearbyCoordinates = null;
-async function loadSalonDirectory(query=''){try{const params=new URLSearchParams();if(query)params.set('q',query);const city=$('#marketLocation')?.value.trim();if(city)params.set('city',city);if(nearbyCoordinates){params.set('lat',nearbyCoordinates.latitude);params.set('lng',nearbyCoordinates.longitude);}let rows=await api(`/api/public/salons${params.size?`?${params.toString()}`:''}`);const sort=$('#salonSort')?.value;if(sort==='rating')rows.sort((a,b)=>(b.averageRating??-1)-(a.averageRating??-1)||(b.ratingCount??0)-(a.ratingCount??0));if(sort==='distance')rows.sort((a,b)=>(a.distanceKm??Infinity)-(b.distanceKm??Infinity));$('#salonGrid').innerHTML=rows.length?rows.map(s=>`<article class="salon-card"><span class="eyebrow">${escapeHtml(s.country||'SALON')}${s.distanceKm!==null?` · ${s.distanceKm} KM AWAY`:''}</span><h3>${escapeHtml(s.name)}</h3><div class="salon-rating">${s.averageRating!==null?`★ ${s.averageRating} <span>(${s.ratingCount} review${s.ratingCount===1?'':'s'})</span>`:'☆ New · no reviews yet'}</div><p>${escapeHtml(s.branchName)}${s.city?` · ${escapeHtml(s.city)}`:''}${s.country?`, ${escapeHtml(s.country)}`:''}</p><div><span>${escapeHtml(s.currency)}</span><button class="text-button" data-book-salon="${escapeHtml(s.slug)}" data-book-branch="${escapeHtml(s.branchId)}">View & book →</button></div></article>`).join(''):'<p class="empty-state">No listed locations match that search. Try another city or country.</p>';$$('[data-book-salon]').forEach(btn=>btn.addEventListener('click',()=>{publicContext={salon:btn.dataset.bookSalon,branch:btn.dataset.bookBranch};history.replaceState({},'',`?salon=${encodeURIComponent(publicContext.salon)}&branch=${encodeURIComponent(publicContext.branch)}#services`);$('#salonExperience').hidden=false;loadPublicData();loadMyBookings().catch(()=>{});document.querySelector('#services').scrollIntoView({behavior:'smooth'});}));}catch(e){$('#salonGrid').innerHTML=`<p class="loading">${escapeHtml(e.message)}</p>`;}}
+async function loadSalonDirectory(query = '') {
+  try {
+    const params = new URLSearchParams();
+    if (query) params.set('q', query);
+    const city = $('#marketLocation')?.value.trim();
+    if (city) params.set('city', city);
+    if (nearbyCoordinates) { params.set('lat', nearbyCoordinates.latitude); params.set('lng', nearbyCoordinates.longitude); }
+    const rows = await api(`/api/public/salons${params.size ? `?${params.toString()}` : ''}`);
+    const sort = $('#salonSort')?.value;
+    if (sort === 'rating') rows.sort((a, b) => (b.averageRating ?? -1) - (a.averageRating ?? -1) || (b.ratingCount ?? 0) - (a.ratingCount ?? 0));
+    if (sort === 'distance') rows.sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
+    $('#salonGrid').innerHTML = rows.length ? rows.map(s => `<article class="salon-card"><span class="eyebrow">${escapeHtml(s.country || 'SALON')}${s.distanceKm !== null ? ` &middot; ${s.distanceKm} KM AWAY` : ''}</span><h3>${escapeHtml(s.name)}</h3><div class="salon-rating">${s.averageRating !== null ? `&#9733; ${s.averageRating} <span>(${s.ratingCount} review${s.ratingCount === 1 ? '' : 's'})</span>` : 'New &middot; no reviews yet'}</div><p>${escapeHtml(s.branchName)}${s.city ? ` &middot; ${escapeHtml(s.city)}` : ''}${s.country ? `, ${escapeHtml(s.country)}` : ''}</p><div><span>${escapeHtml(s.currency)}</span><a class="text-button" href="/salon/${encodeURIComponent(s.slug)}?branch=${encodeURIComponent(s.branchId)}">View &amp; book &rarr;</a></div></article>`).join('') : '<p class="empty-state">No listed locations match that search. Try another city or country.</p>';
+  } catch (error) { $('#salonGrid').innerHTML = `<p class="loading">${escapeHtml(error.message)}</p>`; }
+}
 $('#useMyLocation').addEventListener('click',()=>{const status=$('#locationStatus');if(!navigator.geolocation){status.textContent='Location is not available in this browser. Search by city or country instead.';return;}status.textContent='Finding salons near you…';navigator.geolocation.getCurrentPosition(position=>{nearbyCoordinates={latitude:position.coords.latitude,longitude:position.coords.longitude};status.textContent='Nearby salons are sorted by distance from your current location.';loadSalonDirectory($('#salonSearch').value.trim());},error=>{status.textContent=error.code===1?'Location permission was declined. Search by city or country instead.':'Could not get your location. Search by city or country instead.';},{enableHighAccuracy:false,timeout:10000,maximumAge:300000});});
 let salonSearchTimer;$('#salonSearch').addEventListener('input',e=>{clearTimeout(salonSearchTimer);salonSearchTimer=setTimeout(()=>loadSalonDirectory(e.target.value.trim()),220);});
 $('#salonSort').addEventListener('change',()=>loadSalonDirectory($('#salonSearch').value.trim()));
-$('#marketSearchForm').addEventListener('submit',event=>{event.preventDefault();$('#salonSearch').value=$('#marketQuery').value.trim();loadSalonDirectory($('#salonSearch').value);document.querySelector('#salonDirectory').scrollIntoView({behavior:'smooth'});});
-$('#partnerLoginCta').addEventListener('click',()=>openAdmin(false));
+$('#marketSearchForm').addEventListener('submit',event=>{event.preventDefault();const params=new URLSearchParams();const query=$('#marketQuery').value.trim();const city=$('#marketLocation').value.trim();if(query)params.set('q',query);if(city)params.set('city',city);navigate(`/salons${params.size?`?${params.toString()}`:''}`);});
+
 function captureSalonLocation(formSelector){const form=$(formSelector);if(!navigator.geolocation){notify('Location is unavailable in this browser.',true);return;}navigator.geolocation.getCurrentPosition(position=>{form.elements.latitude.value=position.coords.latitude.toFixed(6);form.elements.longitude.value=position.coords.longitude.toFixed(6);notify('Salon map pin added.');},()=>notify('Could not read location. Enter the map coordinates manually.',true),{enableHighAccuracy:true,timeout:12000});}
 $('#captureSignupLocation').addEventListener('click',()=>captureSalonLocation('#adminLogin'));$('#captureBranchLocation').addEventListener('click',()=>captureSalonLocation('#branchForm'));
 let customerAuthMode = 'login';
@@ -321,4 +409,4 @@ $('#customerLogout').addEventListener('click',()=>{sessionStorage.removeItem('sa
 async function loadMyBookings(){if(!sessionStorage.getItem('salonCustomerToken'))return;const bookings=await api('/api/customer/bookings');$('#myBookings').innerHTML=bookings.length?`<span class="eyebrow">YOUR VISITS AT THIS LOCATION</span>`+bookings.map(b=>`<article class="my-booking-row"><div><strong>${escapeHtml(b.serviceName)}</strong><small>${escapeHtml(b.date)} · ${escapeHtml(b.time)} · ${escapeHtml(b.status.replaceAll('-',' '))}</small></div><small>${b.depositForfeited?'Advance retained for no-show':b.paymentStatus==='deposit_due'?'Advance payment due':b.depositAmount?`Advance: ${moneyFor(b.depositAmount,b.depositCurrency)}`:'No advance'}</small>${b.status==='completed'?`<button class="text-button" data-rate-reference="${escapeHtml(b.reference)}">Rate visit</button>`:''}</article>`).join(''):'<p class="empty-state">Your salon bookings will appear here.</p>';
   $$('[data-rate-reference]').forEach(button=>button.addEventListener('click',async()=>{const rating=Number(prompt('Rate your visit from 1 to 5 stars'));if(!Number.isInteger(rating)||rating<1||rating>5)return;const comment=prompt('Share a short review (optional)')||'';try{await api('/api/reviews',{method:'POST',body:JSON.stringify({reference:button.dataset.rateReference,rating,comment})});notify('Thanks for reviewing this salon.');await loadMyBookings();await loadSalonDirectory($('#salonSearch').value.trim());}catch(error){notify(error.message,true);}}));}
 restoreCustomerSession();
-loadSalonDirectory();if(new URLSearchParams(location.search).has('salon'))loadPublicData();if(sessionStorage.getItem(tokenKey))resumeSession();
+renderRoute();if(sessionStorage.getItem(tokenKey)&&resolveRoute().name==='studio')resumeSession();

@@ -4,6 +4,19 @@
 
 A responsive salon marketplace website with location-led salon discovery, ratings, customer accounts, online booking, and salon partner tools. It connects local customers to salons while giving salon owners a multi-brand, multi-branch operations workspace. Each branch has its own appointments, team, services, customers, stock, local time zone, and currency. Owners can switch locations from one workspace and review their portfolio across branches.
 
+## Web pages
+
+The web app uses direct, reloadable routes for each main customer and salon workflow:
+
+- `/` : marketplace home.
+- `/salons` : salon search and discovery.
+- `/salon/:slug` : a salon profile and service menu.
+- `/salon/:slug/booking` : booking and customer sign-in.
+- `/manage-booking` : reschedule or cancel with the booking reference.
+- `/partner` : salon partner overview.
+- `/partner/login` and `/partner/signup` : partner access.
+- `/studio/:section` : overview, appointments, point of sale, customers, inventory, reports, team, and settings.
+
 ## Run locally
 
 1. Install Node.js 20 or newer.
