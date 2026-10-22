@@ -10,6 +10,7 @@ The web app uses direct, reloadable routes for each main customer and salon work
 
 - `/` : marketplace home.
 - `/salons` : salon search and discovery.
+- `/account` : customer sign-in, sign-up, and bookings across salon locations.
 - `/salon/:slug` : a salon profile and service menu.
 - `/salon/:slug/booking` : booking and customer sign-in.
 - `/manage-booking` : reschedule or cancel with the booking reference.

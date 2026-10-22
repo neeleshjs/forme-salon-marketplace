@@ -373,7 +373,17 @@ app.post('/api/reviews', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 app.get('/api/customer/bookings', async (req, res, next) => {
-  try { const user = customerFromRequest(req); if (!user) return res.status(401).json({ error: 'Sign in to see your bookings.' }); const state = await readState(); res.json(state.appointments.filter((item) => item.customerUserId === user.id).sort((a, b) => `${b.date}${b.time}`.localeCompare(`${a.date}${a.time}`)).map(({ reference, serviceName, staffName, date, time, status, paymentStatus, depositAmount, depositCurrency, depositForfeited }) => ({ reference, serviceName, staffName, date, time, status, paymentStatus, depositAmount, depositCurrency, depositForfeited }))); } catch (e) { next(e); }
+  try {
+    const scope = scopeStorage.getStore(); const user = customerFromRequest(req, scope?.platform);
+    if (!user) return res.status(401).json({ error: 'Sign in to see your bookings.' });
+    const branches = scope.platform.tenants.flatMap((tenant) => (tenant.branches || []).map((branch) => ({ tenant, branch })));
+    const bookings = (await Promise.all(branches.map(async ({ tenant, branch }) => {
+      const state = await readStateFor({ tenant, branch });
+      return state.appointments.filter((item) => item.customerUserId === user.id).map((item) => ({ reference: item.reference, serviceName: item.serviceName, staffName: item.staffName, date: item.date, time: item.time, status: item.status, paymentStatus: item.paymentStatus, depositAmount: item.depositAmount, depositCurrency: item.depositCurrency, depositForfeited: item.depositForfeited, salonName: tenant.name, salonSlug: tenant.slug, branchName: branch.name, branchId: branch.id }));
+    }))).flat();
+    bookings.sort((a, b) => `${b.date}${b.time}`.localeCompare(`${a.date}${a.time}`));
+    res.json(bookings);
+  } catch (e) { next(e); }
 });
 app.get('/api/services', async (_req, res, next) => { try { res.json((await readState()).services.filter((s) => s.active)); } catch (e) { next(e); } });
 app.get('/api/staff', async (_req, res, next) => { try { res.json((await readState()).staff.filter((s) => s.active).map(({ id, name, role, color }) => ({ id, name, role, color }))); } catch (e) { next(e); } });

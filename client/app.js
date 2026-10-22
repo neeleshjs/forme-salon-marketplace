@@ -24,6 +24,7 @@ function resolveRoute() {
   if (path === '/' && params.has('salon')) return { name: 'salon', slug: params.get('salon') };
   if (path === '/') return { name: 'home' };
   if (path === '/salons') return { name: 'salons' };
+  if (path === '/account') return { name: 'account' };
   if (path === '/partner') return { name: 'partner' };
   if (path === '/partner/login') return { name: 'partner-login' };
   if (path === '/partner/signup') return { name: 'partner-signup' };
@@ -47,8 +48,14 @@ function navigate(path, { replace = false } = {}) {
 
 function renderRoute() {
   const route = resolveRoute();
-  const publicChildren = new Set(({ home: ['platform', 'marketCategories', 'howItWorks', 'partner'], salons: ['salonDirectory'], salon: ['salonExperience'], booking: ['salonExperience'], manage: ['salonExperience'], partner: ['partner'], 'not-found': ['notFound'] })[route.name] || []);
+  const publicChildren = new Set(({ home: ['platform', 'marketCategories', 'howItWorks', 'partner'], salons: ['salonDirectory'], account: ['customerAccountPage'], salon: ['salonExperience'], booking: ['salonExperience'], manage: ['salonExperience'], partner: ['partner'], 'not-found': ['notFound'] })[route.name] || []);
   $$('main#top > section').forEach(section => { section.hidden = !publicChildren.has(section.id); });
+  const customerAccess = $('#customerAccess');
+  if (customerAccess) {
+    let bookingMount = $('#bookingCustomerMount');
+    if (!bookingMount) { bookingMount = document.createElement('div'); bookingMount.id = 'bookingCustomerMount'; customerAccess.before(bookingMount); }
+    (route.name === 'account' ? $('#accountAccessMount') : bookingMount).append(customerAccess);
+  }
   const privatePage = ['partner-login', 'partner-signup', 'studio'].includes(route.name);
   $('#siteFooter').hidden = ['partner-login', 'partner-signup', 'studio', 'not-found'].includes(route.name);
   $('#adminShell').hidden = !privatePage;
@@ -78,6 +85,8 @@ function renderRoute() {
     $('#marketLocation').value = params.get('city') || '';
     loadSalonDirectory($('#salonSearch').value.trim());
   } else if (route.name === 'partner') document.title = 'For salon partners - FORME';
+  else if (route.name === 'account') { document.title = 'My account - FORME'; $('#customerAuthPanel h3').textContent = 'Sign in to view your visits'; }
+  else if (['salon', 'booking'].includes(route.name)) $('#customerAuthPanel h3').textContent = 'Sign in to book';
   else if (route.name === 'salon' || route.name === 'booking') loadPublicData();
   else if (route.name === 'manage') document.title = 'Manage booking - FORME';
   else if (route.name === 'partner-login' || route.name === 'partner-signup') {
@@ -111,6 +120,7 @@ function setDateMin(input) { if (input) input.min = localDate(); }
 async function loadPublicData() {
   try {
     const [profile, serviceList, staffList, ratingData] = await Promise.all([api('/api/salon/profile'), api('/api/services'), api('/api/staff'), api('/api/reviews')]);
+    if (!['salon', 'booking'].includes(resolveRoute().name)) return;
     currentCurrency = profile.branch.currency || 'INR'; currentLocale = profile.branch.locale || 'en-IN'; currentTimeZone = profile.branch.timeZone || 'Asia/Kolkata'; services = serviceList; staff = staffList; $('#salonRatingSummary').textContent = ratingData.ratingCount ? `★ ${ratingData.averageRating} · ${ratingData.ratingCount} verified review${ratingData.ratingCount===1?'':'s'}` : 'New salon · be the first to rate';
     $('#salonExperience').hidden = false; document.title = `${profile.tenantName} - ${profile.branch.name} - FORME`; $('#manageBookingLink').href = `/manage-booking?salon=${encodeURIComponent(publicContext.salon)}&branch=${encodeURIComponent(profile.branch.id)}`; $('.hero-copy .button').href = `/salon/${encodeURIComponent(publicContext.salon)}/booking?branch=${encodeURIComponent(profile.branch.id)}`;
     $('#dateInput').value = localDate(); $('#manageDate').value = localDate();
@@ -406,7 +416,7 @@ async function restoreCustomerSession(){if(!sessionStorage.getItem('salonCustome
 $('#customerLoginButton').addEventListener('click',async()=>{try{const result=await api('/api/customer/login',{method:'POST',body:JSON.stringify({email:$('#customerLoginEmail').value,password:$('#customerLoginPassword').value})});sessionStorage.setItem('salonCustomerToken',result.customerToken);setCustomerSession(result.customer);}catch(error){showMessage($('#customerAuthMessage'),error.message,true);}});
 $('#customerSignupButton').addEventListener('click',async()=>{try{const result=await api('/api/customer/register',{method:'POST',body:JSON.stringify({name:$('#customerSignupName').value,email:$('#customerSignupEmail').value,phone:$('#customerSignupPhone').value,password:$('#customerSignupPassword').value})});sessionStorage.setItem('salonCustomerToken',result.customerToken);setCustomerSession(result.customer);}catch(error){showMessage($('#customerAuthMessage'),error.message,true);}});
 $('#customerLogout').addEventListener('click',()=>{sessionStorage.removeItem('salonCustomerToken');$('#customerSessionPanel').hidden=true;$('#customerAuthPanel').hidden=false;$('#myBookings').innerHTML='';$('#bookingForm').elements.name.value='';$('#bookingForm').elements.phone.value='';showMessage($('#customerAuthMessage'),'You are signed out.');});
-async function loadMyBookings(){if(!sessionStorage.getItem('salonCustomerToken'))return;const bookings=await api('/api/customer/bookings');$('#myBookings').innerHTML=bookings.length?`<span class="eyebrow">YOUR VISITS AT THIS LOCATION</span>`+bookings.map(b=>`<article class="my-booking-row"><div><strong>${escapeHtml(b.serviceName)}</strong><small>${escapeHtml(b.date)} · ${escapeHtml(b.time)} · ${escapeHtml(b.status.replaceAll('-',' '))}</small></div><small>${b.depositForfeited?'Advance retained for no-show':b.paymentStatus==='deposit_due'?'Advance payment due':b.depositAmount?`Advance: ${moneyFor(b.depositAmount,b.depositCurrency)}`:'No advance'}</small>${b.status==='completed'?`<button class="text-button" data-rate-reference="${escapeHtml(b.reference)}">Rate visit</button>`:''}</article>`).join(''):'<p class="empty-state">Your salon bookings will appear here.</p>';
-  $$('[data-rate-reference]').forEach(button=>button.addEventListener('click',async()=>{const rating=Number(prompt('Rate your visit from 1 to 5 stars'));if(!Number.isInteger(rating)||rating<1||rating>5)return;const comment=prompt('Share a short review (optional)')||'';try{await api('/api/reviews',{method:'POST',body:JSON.stringify({reference:button.dataset.rateReference,rating,comment})});notify('Thanks for reviewing this salon.');await loadMyBookings();await loadSalonDirectory($('#salonSearch').value.trim());}catch(error){notify(error.message,true);}}));}
+async function loadMyBookings(){if(!sessionStorage.getItem('salonCustomerToken'))return;const bookings=await api('/api/customer/bookings');$('#myBookings').innerHTML=bookings.length?`<span class="eyebrow">YOUR VISITS</span>`+bookings.map(b=>`<article class="my-booking-row"><div><strong>${escapeHtml(b.salonName)} · ${escapeHtml(b.branchName)}</strong><small>${escapeHtml(b.serviceName)} with ${escapeHtml(b.staffName)}</small><small>${escapeHtml(b.date)} · ${escapeHtml(b.time)} · ${escapeHtml(b.status.replaceAll('-',' '))}</small></div><small>${b.depositForfeited?'Advance retained for no-show':b.paymentStatus==='deposit_due'?'Advance payment due':b.depositAmount?`Advance: ${moneyFor(b.depositAmount,b.depositCurrency)}`:'No advance'}</small>${b.status==='completed'?`<button class="text-button" data-rate-reference="${escapeHtml(b.reference)}" data-salon-slug="${escapeHtml(b.salonSlug)}" data-branch-id="${escapeHtml(b.branchId)}">Rate visit</button>`:''}</article>`).join(''):'<p class="empty-state">Your salon bookings will appear here.</p>';
+  $$('[data-rate-reference]').forEach(button=>button.addEventListener('click',async()=>{const rating=Number(prompt('Rate your visit from 1 to 5 stars'));if(!Number.isInteger(rating)||rating<1||rating>5)return;const comment=prompt('Share a short review (optional)')||'';const previous={salon:publicContext.salon,branch:publicContext.branch};publicContext.salon=button.dataset.salonSlug;publicContext.branch=button.dataset.branchId;try{await api('/api/reviews',{method:'POST',body:JSON.stringify({reference:button.dataset.rateReference,rating,comment})});notify('Thanks for reviewing this salon.');await loadMyBookings();}catch(error){notify(error.message,true);}finally{publicContext=previous;}}));}
 restoreCustomerSession();
 renderRoute();if(sessionStorage.getItem(tokenKey)&&resolveRoute().name==='studio')resumeSession();
