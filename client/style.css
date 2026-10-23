@@ -18,3 +18,149 @@
 body[data-page="partner-login"]>.nav,body[data-page="partner-signup"]>.nav,body[data-page="studio"]>.nav{display:none}.page-not-found{min-height:56vh;padding-top:100px;padding-bottom:100px}.page-not-found h1{max-width:620px;font:500 clamp(38px,6vw,68px)/1.05 "Playfair Display",serif}.manage-copy a{display:inline-block;margin-top:10px}
 .customer-account-page{min-height:60vh;padding-top:5rem;padding-bottom:5rem}.customer-account-heading{max-width:650px;margin-bottom:2rem}.customer-account-heading h1{margin:.6rem 0;font:500 clamp(2.5rem,5vw,4.5rem)/1.05 "Playfair Display",serif}.customer-account-heading p{color:#747970;line-height:1.7}.customer-account-page .customer-access{max-width:680px;margin-bottom:1.5rem;padding:1.4rem}.customer-account-page .my-bookings{gap:.75rem}.customer-account-page .my-booking-row{padding:.9rem 0}.customer-account-page>.text-button{display:inline-block;margin-top:1rem}
 .auth-otp-fields{display:grid;gap:.7rem}.auth-otp-fields[hidden]{display:none}.auth-otp-fields label{display:grid;gap:.3rem;font-size:.78rem}.auth-otp-fields input{width:100%;border:1px solid #ddd8ce;border-radius:7px;padding:.7rem;font:inherit}.auth-otp-fields .button{width:100%}
+
+/* Responsive marketplace and partner workspace polish */
+:root{--shadow:0 16px 44px #17211c12;scroll-padding-top:96px}
+body{font-size:16px;line-height:1.55;overflow-x:hidden}
+a,button,input,select,textarea{-webkit-tap-highlight-color:transparent}
+:focus-visible{outline:3px solid #9bb96d;outline-offset:3px}
+.nav{position:sticky;z-index:30;top:12px;width:min(1240px,calc(100% - 40px));height:72px;margin:12px auto 0;padding:0 24px;border:1px solid #e9e6dd;border-radius:16px;background:#fffdf8f2;box-shadow:0 8px 28px #17211c0a;backdrop-filter:blur(14px)}
+.brand{font-size:15px}.brand-mark{width:40px;height:40px}.brand-sub{font-size:8px}
+.nav nav{gap:clamp(14px,2vw,27px)}
+.nav nav a,.admin-open{font-size:13px;font-weight:600;text-decoration:none}
+.nav nav a:not(.admin-open):hover{color:#75894e}
+.admin-open{padding:10px 15px;border:1px solid #dce2d3;border-radius:9px;background:#f3f6ed}
+.mobile-menu-toggle{display:none}
+.market-hero{padding-top:4rem;padding-bottom:3.5rem;gap:clamp(2rem,5vw,5rem)}
+.market-copy h1{max-width:650px;font-size:clamp(3.5rem,7vw,6.3rem);line-height:.98}
+.market-copy>p{max-width:520px;font-size:1.08rem;line-height:1.75}
+.market-search{border-radius:14px;box-shadow:0 16px 40px #17211c10}
+.market-search input{font-size:.9rem}
+.market-search .button,.button{min-height:48px;border-radius:9px}
+.market-proof{font-size:.78rem}
+.market-art{min-height:460px}
+.market-art-photo{border-radius:18px;background:linear-gradient(155deg,#3d4538 0%,#7b654f 45%,#b99a75 100%)}
+.market-art-photo:before{width:360px;height:420px;right:0;top:38px}
+.market-floating-card{border-radius:14px;padding:1.05rem 1.15rem}
+.market-categories{padding:1.25rem 0 1.75rem;gap:.85rem}
+.market-categories>a{min-height:62px;border-radius:12px;font-size:1.1rem}
+.market-categories>a span{font-size:.79rem}
+.salon-directory{padding-top:4rem!important;padding-bottom:4rem}
+.salon-directory .section-head{gap:2rem}
+.section-head h2,.salon-directory .section-head h2{font-size:clamp(2.1rem,4vw,3rem)}
+.directory-subtitle{font-size:.95rem}
+.location-tools{gap:.55rem}
+.directory-search,.directory-sort,.location-pin-button{min-height:46px;border-radius:10px;font:inherit;font-size:.88rem}
+.salon-card{min-height:245px;padding:1.45rem;border-radius:16px;background:linear-gradient(160deg,#fff 0%,#fff 72%,#f8f8f3 100%);box-shadow:0 10px 28px #17211c0b}
+.salon-card:before{height:4px;background:linear-gradient(90deg,#8ea56e,#d8bd91)}
+.salon-card h3{font-size:1.55rem;line-height:1.2}
+.salon-card p{font-size:.9rem;line-height:1.6}
+.salon-card .eyebrow{font-size:.7rem;letter-spacing:.12em}
+.salon-card>div{gap:.7rem;padding-top:1.05rem;font-size:.88rem}
+.salon-card>div .text-button{font-size:.88rem;font-weight:700}
+.market-how{padding-top:4.5rem;padding-bottom:5rem}
+.market-how-grid article{padding:1.5rem;border-radius:15px;box-shadow:0 8px 24px #17211c08}
+.market-how-grid h3{font-size:1.08rem}
+.market-how-grid p{font-size:.9rem;line-height:1.7}
+.create-salon-cta{border-radius:0}
+.create-salon-inner{padding-block:.5rem}
+.create-salon-inner p{font-size:1rem;line-height:1.7}
+.customer-access{border-radius:15px;box-shadow:0 10px 30px #17211c08}
+.customer-auth-head h3{font-size:1.45rem}
+.customer-auth-fields label{font-size:.85rem}
+.customer-auth-fields input,.auth-otp-fields input{min-height:46px;border-radius:9px;font-size:1rem}
+.customer-auth-fields .button{min-height:48px}
+.dash-sidebar{padding:22px 16px}
+.dash-nav button{min-height:42px;border-radius:8px;font-size:12px}
+.dash-topbar h1{font-size:27px}
+.dash-content{padding:28px 36px 52px}
+.metric-card,.panel{border-radius:13px;box-shadow:0 8px 24px #15221b08}
+.metric-card{padding:19px}
+.metric-label{font-size:11px}
+.metric-note{font-size:10px}
+.panel{padding:22px}
+.panel h2{font-size:23px}
+.data-table th{font-size:9px}
+.data-table td{font-size:11px}
+.data-table td strong{font-size:12px}
+.data-table select,.data-table button,.data-table input{min-height:36px;font-size:10px}
+.toolbar label,.settings-form label,.booking-form label,.manage-form label{font-size:12px}
+.toolbar input,.toolbar select,.search-label input{min-height:42px;font-size:12px}
+.footer{padding:30px 0}
+.footer-inner{font-size:12px}
+@media(max-width:900px){
+  .nav{width:min(100% - 28px,720px);padding-inline:18px}
+  .nav nav{gap:13px}
+  .nav nav a,.admin-open{font-size:12px}
+  .market-hero{gap:2rem}
+  .market-art{min-height:390px}
+  .dash-content{padding-inline:22px}
+}
+@media(max-width:760px){
+  :root{scroll-padding-top:76px}
+  .wrap{width:min(100% - 32px,600px)}
+  .nav{top:8px;width:calc(100% - 20px);height:62px;margin-top:8px;padding:0 13px;border-radius:14px}
+  .brand{gap:8px;font-size:14px}
+  .brand-mark{width:36px;height:36px}
+  .mobile-menu-toggle{display:flex;width:42px;height:42px;flex-direction:column;align-items:center;justify-content:center;gap:5px;border:1px solid #e6e8df;border-radius:10px;background:#fff;color:var(--ink);cursor:pointer}
+  .mobile-menu-toggle span{display:block;width:18px;height:2px;border-radius:2px;background:currentColor;transition:transform .18s,opacity .18s}
+  .mobile-menu-toggle[aria-expanded="true"] span:first-child{transform:translateY(7px) rotate(45deg)}
+  .mobile-menu-toggle[aria-expanded="true"] span:nth-child(2){opacity:0}
+  .mobile-menu-toggle[aria-expanded="true"] span:last-child{transform:translateY(-7px) rotate(-45deg)}
+  .nav nav{position:absolute;top:calc(100% + 8px);right:0;left:0;display:none;gap:4px;padding:10px;border:1px solid #e9e6dd;border-radius:14px;background:#fffdf8;box-shadow:0 16px 40px #17211c18}
+  .nav nav.is-open{display:grid}
+  .nav nav a,.nav nav a.admin-open{display:flex;min-height:46px;align-items:center;padding:0 13px;border:0;border-radius:9px;font-size:.95rem}
+  .nav nav a:hover{background:#f3f5ee}
+  .nav nav .admin-open{margin-top:4px;background:#eff3e7;color:var(--green)}
+  .market-hero{padding:2.3rem 0 1.8rem;gap:1.1rem}
+  .market-copy{padding:.4rem 0}
+  .market-copy h1{font-size:clamp(3.1rem,12vw,4.6rem);margin:.75rem 0}
+  .market-copy>p{font-size:1rem}
+  .market-art{min-height:340px;padding-top:.6rem}
+  .market-art-photo{border-radius:15px}
+  .market-categories{padding-top:1.1rem}
+  .market-categories>div span{font-size:.98rem}
+  .market-categories small{font-size:.77rem}
+  .market-categories>a{min-height:56px;border-radius:11px}
+  .section-head{gap:1rem}
+  .salon-directory{padding-top:2.5rem!important;padding-bottom:3rem}
+  .salon-directory .section-head{align-items:stretch}
+  .location-tools{display:grid;grid-template-columns:1fr 1fr}
+  .location-tools .directory-search{grid-column:1/-1}
+  .location-tools .button{width:auto;min-height:46px;padding-inline:12px;font-size:.85rem}
+  .directory-sort{min-width:0}
+  .salon-card{min-height:210px}
+  .market-how{padding:3rem 0 3.5rem}
+  .create-salon-inner{padding-block:0}
+  .dash-topbar{top:51px}
+  .dash-content{padding:18px 14px 38px}
+  .dash-nav button{font-size:10px}
+}
+@media(max-width:420px){
+  .wrap{width:calc(100% - 24px)}
+  .market-copy h1{font-size:3.15rem}
+  .market-art{min-height:285px}
+  .market-art-overlay{left:1rem;top:1.1rem}
+  .market-art-overlay strong{font-size:2.2rem}
+  .market-floating-card{width:min(260px,88%);padding:.8rem}
+  .market-categories{gap:.45rem}
+  .market-categories>a{gap:.4rem;padding:.55rem;font-size:.85rem}
+  .market-categories>a span{font-size:.68rem}
+  .location-tools{grid-template-columns:1fr}
+  .location-tools .directory-search{grid-column:auto}
+  .location-tools .button{width:100%}
+  .salon-card{min-height:190px;padding:1.15rem}
+  .salon-card h3{font-size:1.4rem}
+  .dash-nav button{font-size:10px;gap:5px;padding-inline:9px}
+  .dash-nav button span{font-size:13px}
+  .dash-topbar h1{font-size:18px}
+  .dash-topbar .eyebrow{font-size:7px}
+  .dash-content{padding-inline:10px}
+  .metric-card{padding:11px}
+  .metric-label{font-size:9px}
+  .metric-value{font-size:19px}
+  .panel{padding:12px}
+  .toolbar-actions{flex-wrap:wrap}
+  .toolbar-actions .button{min-width:110px}
+}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{scroll-behavior:auto!important;transition-duration:.01ms!important;animation-duration:.01ms!important;animation-iteration-count:1!important}}

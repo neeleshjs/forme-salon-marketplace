@@ -106,6 +106,33 @@ function renderRoute() {
 
 window.addEventListener('popstate', renderRoute);
 
+const mobileMenuToggle = $('#mobileMenuToggle');
+const mainNavigation = $('#mainNavigation');
+function closeMobileNavigation() {
+  if (!mobileMenuToggle || !mainNavigation) return;
+  mobileMenuToggle.setAttribute('aria-expanded', 'false');
+  mobileMenuToggle.setAttribute('aria-label', 'Open navigation');
+  mainNavigation.classList.remove('is-open');
+}
+mobileMenuToggle?.addEventListener('click', () => {
+  const isOpen = mobileMenuToggle.getAttribute('aria-expanded') === 'true';
+  mobileMenuToggle.setAttribute('aria-expanded', String(!isOpen));
+  mobileMenuToggle.setAttribute('aria-label', isOpen ? 'Open navigation' : 'Close navigation');
+  mainNavigation.classList.toggle('is-open', !isOpen);
+});
+mainNavigation?.addEventListener('click', (event) => {
+  if (event.target.closest('a')) closeMobileNavigation();
+});
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('.nav')) closeMobileNavigation();
+});
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeMobileNavigation();
+});
+window.addEventListener('resize', () => {
+  if (window.matchMedia('(min-width: 761px)').matches) closeMobileNavigation();
+});
+
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
