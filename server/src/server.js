@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import pg from 'pg';
+import nodemailer from 'nodemailer';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID, randomBytes, randomInt, timingSafeEqual, createHmac, scryptSync } from 'node:crypto';
@@ -252,10 +253,18 @@ function normalizePhoneNumber(value) {
   if (!/^[1-9]\d{7,14}$/.test(digits)) throw new Error('Enter a phone number with country code, for example +91 98765 43210.');
   return { e164: `+${digits}`, digits };
 }
-function emailOtpConfigurationReady() {
-  return Boolean(process.env.RESEND_API_KEY && process.env.OTP_EMAIL_FROM);
+function emailDeliveryProvider() {
+  if (process.env.GMAIL_SMTP_USER || process.env.GMAIL_SMTP_APP_PASSWORD) return 'gmail';
+  if (process.env.RESEND_API_KEY && process.env.OTP_EMAIL_FROM) return 'resend';
+  return '';
 }
-function passwordResetEmailReady() { return Boolean(process.env.RESEND_API_KEY && process.env.OTP_EMAIL_FROM); }
+function emailDeliveryReady() {
+  const provider = emailDeliveryProvider();
+  if (provider === 'gmail') return Boolean(process.env.GMAIL_SMTP_USER && process.env.GMAIL_SMTP_APP_PASSWORD);
+  return provider === 'resend';
+}
+function emailOtpConfigurationReady() { return emailDeliveryReady(); }
+function passwordResetEmailReady() { return emailDeliveryReady(); }
 function maskedEmail(email) { const [name, domain] = email.split('@'); return `${name.slice(0, 1)}${'*'.repeat(Math.max(2, name.length - 1))}@${domain}`; }
 function hashOtp(challengeId, channel, value) { return createHmac('sha256', sessionSecret).update(`${challengeId}:${channel}:${value}`).digest(); }
 function otpMatches(challengeId, channel, value, expectedHex) {
@@ -263,20 +272,37 @@ function otpMatches(challengeId, channel, value, expectedHex) {
   let expected; try { expected = Buffer.from(expectedHex || '', 'hex'); } catch { return false; }
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
-async function sendVerificationEmail(email, code) {
+async function sendEmail({ email, subject, html }) {
+  if (emailDeliveryProvider() === 'gmail') {
+    const username = String(process.env.GMAIL_SMTP_USER || '').trim();
+    const appPassword = String(process.env.GMAIL_SMTP_APP_PASSWORD || '').replace(/\s/g, '');
+    if (!username || !appPassword) throw Object.assign(new Error('Gmail SMTP is not fully configured.'), { deliveryChannel: 'email', emailProvider: 'gmail' });
+    const transporter = nodemailer.createTransport({ host: 'smtp.gmail.com', port: 465, secure: true, auth: { user: username, pass: appPassword }, connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 15000 });
+    try {
+      await transporter.sendMail({ from: `FORME <${username}>`, to: email, subject, html });
+    } catch (error) {
+      throw Object.assign(new Error('Gmail SMTP could not send the email.'), { deliveryChannel: 'email', emailProvider: 'gmail', providerCode: error.code || null });
+    } finally {
+      transporter.close();
+    }
+    return;
+  }
   let response;
   try {
-    response = await fetch('https://api.resend.com/emails', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.OTP_EMAIL_FROM, to: [email], subject: 'Your FORME verification code', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Verify your FORME account</h2><p>Your email verification code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request it, you can ignore this email.</p></div>` }) });
+    response = await fetch('https://api.resend.com/emails', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.OTP_EMAIL_FROM, to: [email], subject, html }) });
   } catch {
-    throw Object.assign(new Error('Email verification service is unavailable.'), { deliveryChannel: 'email' });
+    throw Object.assign(new Error('Email verification service is unavailable.'), { deliveryChannel: 'email', emailProvider: 'resend' });
   }
-  if (!response.ok) throw Object.assign(new Error('Email provider rejected verification.'), { deliveryChannel: 'email', providerStatus: response.status });
+  if (!response.ok) throw Object.assign(new Error('Email provider rejected verification.'), { deliveryChannel: 'email', emailProvider: 'resend', providerStatus: response.status });
+}
+async function sendVerificationEmail(email, code) {
+  await sendEmail({ email, subject: 'Your FORME verification code', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Verify your FORME account</h2><p>Your email verification code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request it, you can ignore this email.</p></div>` });
 }
 async function sendPasswordResetEmail(email, code) {
-  const response = await fetch('https://api.resend.com/emails', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.OTP_EMAIL_FROM, to: [email], subject: 'Reset your FORME password', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Reset your FORME password</h2><p>Your password reset code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request a password reset, you can ignore this email.</p></div>` }) });
-  if (!response.ok) throw new Error('Email delivery failed.');
+  await sendEmail({ email, subject: 'Reset your FORME password', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Reset your FORME password</h2><p>Your password reset code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request a password reset, you can ignore this email.</p></div>` });
 }
 function registrationDeliveryError(error) {
+  if (error.emailProvider === 'gmail') return 'Gmail could not send the OTP. Check the Gmail address and App Password in Render; do not use your normal Gmail password.';
   if (error.deliveryChannel === 'email' && error.providerStatus === 403) return 'Email OTP was blocked by Resend. For testing, use the email address on the Resend account, or verify a sender domain and set OTP_EMAIL_FROM to an address on that domain.';
   if (error.deliveryChannel === 'email' && error.providerStatus === 401) return 'Email OTP could not be authorized. Check the Resend API key in Render.';
   return 'Email OTP could not be sent. Check Resend email settings and try again.';
@@ -304,7 +330,7 @@ async function startRegistrationVerification(platform, { purpose, email, phone, 
     sendAttempt.delivered = true;
     await writePlatform(platform);
   } catch (error) {
-    console.warn('Signup OTP delivery failed.', { channel: error.deliveryChannel || 'unknown', providerStatus: error.providerStatus || null });
+    console.warn('Signup OTP delivery failed.', { channel: error.deliveryChannel || 'unknown', provider: error.emailProvider || null, providerStatus: error.providerStatus || null, providerCode: error.providerCode || null });
     platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.id !== challengeId);
     await writePlatform(platform);
     return { status: 502, error: registrationDeliveryError(error) };
