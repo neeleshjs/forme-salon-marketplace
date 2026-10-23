@@ -142,13 +142,16 @@ function tenantChoices(platform, user) {
   return platform.tenants.filter((tenant) => tenant.active && user.tenantIds.includes(tenant.id)).map((tenant) => ({ id: tenant.id, slug: tenant.slug, name: tenant.name, branches: tenant.branches.filter((branch) => branch.active).map(({ id, name, slug, city, country, currency, timeZone }) => ({ id, name, slug, city, country, currency, timeZone })) }));
 }
 function makeSession(user, tenant, branch) {
-  return signToken({ type: 'session', userId: user.id, email: user.email, tenantId: tenant.id, branchId: branch.id, role: tenant.ownerUserId === user.id ? 'owner' : 'manager', exp: Date.now() + 12 * 60 * 60 * 1000 });
+  return signToken({ type: 'session', userId: user.id, authVersion: accountAuthVersion(user), email: user.email, tenantId: tenant.id, branchId: branch.id, role: tenant.ownerUserId === user.id ? 'owner' : 'manager', exp: Date.now() + 12 * 60 * 60 * 1000 });
 }
-function makeCustomerSession(user) { return signToken({ type: 'customer', customerUserId: user.id, exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }); }
+function accountAuthVersion(user) { return Number.isSafeInteger(user?.authVersion) && user.authVersion >= 0 ? user.authVersion : 0; }
+function authVersionMatches(auth, user) { return Number(auth?.authVersion || 0) === accountAuthVersion(user); }
+function makeCustomerSession(user) { return signToken({ type: 'customer', customerUserId: user.id, authVersion: accountAuthVersion(user), exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }); }
 function customerFromRequest(req, platform = scopeStorage.getStore()?.platform) {
   const auth = verifyToken(req.get('x-customer-token'));
   if (auth?.type !== 'customer' || !platform) return null;
-  return platform.customerUsers?.find((user) => user.id === auth.customerUserId && user.active !== false) || null;
+  const user = platform.customerUsers?.find((item) => item.id === auth.customerUserId && item.active !== false);
+  return user && authVersionMatches(auth, user) ? user : null;
 }
 function parseCoordinates(details) {
   const latitude = details.latitude === '' || details.latitude === null || details.latitude === undefined ? null : Number(details.latitude);
@@ -217,6 +220,7 @@ function normalizeOtpPhone(value) {
 function otpConfigurationReady() {
   return Boolean(process.env.RESEND_API_KEY && process.env.OTP_EMAIL_FROM && process.env.MSG91_AUTH_KEY && process.env.MSG91_OTP_TEMPLATE_ID);
 }
+function passwordResetEmailReady() { return Boolean(process.env.RESEND_API_KEY && process.env.OTP_EMAIL_FROM); }
 function maskedEmail(email) { const [name, domain] = email.split('@'); return `${name.slice(0, 1)}${'*'.repeat(Math.max(2, name.length - 1))}@${domain}`; }
 function maskedPhone(phone) { return `${phone.slice(0, 3)}${'*'.repeat(Math.max(4, phone.length - 7))}${phone.slice(-4)}`; }
 function hashOtp(challengeId, channel, value) { return createHmac('sha256', sessionSecret).update(`${challengeId}:${channel}:${value}`).digest(); }
@@ -229,6 +233,10 @@ async function sendVerificationEmail(email, code) {
   const response = await fetch('https://api.resend.com/emails', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.OTP_EMAIL_FROM, to: [email], subject: 'Your FORME verification code', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Verify your FORME account</h2><p>Your email verification code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request it, you can ignore this email.</p></div>` }) });
   if (!response.ok) throw new Error('Email delivery failed.');
 }
+async function sendPasswordResetEmail(email, code) {
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.OTP_EMAIL_FROM, to: [email], subject: 'Reset your FORME password', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Reset your FORME password</h2><p>Your password reset code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request a password reset, you can ignore this email.</p></div>` }) });
+  if (!response.ok) throw new Error('Email delivery failed.');
+}
 async function sendVerificationSms(phone, code) {
   const response = await fetch('https://control.msg91.com/api/v5/flow', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { authkey: process.env.MSG91_AUTH_KEY, accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ template_id: process.env.MSG91_OTP_TEMPLATE_ID, short_url: '0', recipients: [{ mobiles: phone.replace('+', ''), VAR1: code }] }) });
   if (!response.ok) throw new Error('SMS delivery failed.');
@@ -239,13 +247,13 @@ async function startRegistrationVerification(platform, { purpose, email, phone, 
   if (!otpConfigurationReady()) return { status: 503, error: 'Signup verification is not configured yet. Please contact the salon platform administrator.' };
   const now = Date.now(); platform.registrationChallenges ||= []; platform.otpSendHistory ||= [];
   platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
-  const recent = platform.otpSendHistory.filter((item) => item.email === email || item.phone === phone);
+  const recent = platform.otpSendHistory.filter((item) => item.flow !== 'password-reset' && (item.email === email || item.phone === phone));
   if (recent.some((item) => now - item.createdAt < 60 * 1000)) return { status: 429, error: 'Please wait one minute before requesting another code.' };
   if (recent.length >= 3) return { status: 429, error: 'Too many codes were requested. Please try again in an hour.' };
   const challengeId = randomUUID(); const emailCode = String(randomInt(100000, 1000000)); const phoneCode = String(randomInt(100000, 1000000));
   platform.registrationChallenges = platform.registrationChallenges.filter((item) => !(item.purpose === purpose && item.email === email) && item.expiresAt > now);
   const challengeRecord = { id: challengeId, purpose, email, phone, emailOtpHash: hashOtp(challengeId, 'email', emailCode).toString('hex'), phoneOtpHash: hashOtp(challengeId, 'phone', phoneCode).toString('hex'), registration, attempts: 0, expiresAt: now + 10 * 60 * 1000, createdAt: now };
-  platform.registrationChallenges.push(challengeRecord); platform.otpSendHistory.push({ email, phone, createdAt: now }); await writePlatform(platform);
+  platform.registrationChallenges.push(challengeRecord); platform.otpSendHistory.push({ email, phone, flow: 'signup', createdAt: now }); await writePlatform(platform);
   try { await Promise.all([sendVerificationEmail(email, emailCode), sendVerificationSms(phone, phoneCode)]); }
   catch { platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.id !== challengeId); await writePlatform(platform); return { status: 502, error: 'We could not deliver both verification codes. Check the email and phone number, then try again shortly.' }; }
   return { status: 200, challengeId, emailHint: maskedEmail(email), phoneHint: maskedPhone(phone), expiresInSeconds: 600 };
@@ -257,6 +265,51 @@ async function verifyRegistrationCodes(platform, { challengeId, purpose, emailCo
   const valid = otpMatches(challenge.id, 'email', emailCode, challenge.emailOtpHash) && otpMatches(challenge.id, 'phone', phoneCode, challenge.phoneOtpHash);
   if (!valid) { await writePlatform(platform); return { error: 'The email or SMS code is incorrect.' }; }
   return { challenge };
+}
+async function startPasswordReset(platform, { accountType, email }) {
+  if (!passwordResetEmailReady()) return { status: 503, error: 'Password recovery is temporarily unavailable. Please try again later.' };
+  const purpose = `${accountType}-password-reset`; const now = Date.now();
+  platform.passwordResetChallenges ||= []; platform.otpSendHistory ||= [];
+  platform.passwordResetChallenges = platform.passwordResetChallenges.filter((item) => item.expiresAt > now);
+  platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
+  const account = accountType === 'customer'
+    ? platform.customerUsers.find((item) => item.email === email && item.active !== false)
+    : platform.users.find((item) => item.email === email);
+  const activeChallenge = platform.passwordResetChallenges.find((item) => item.purpose === purpose && item.email === email);
+  const recent = platform.otpSendHistory.filter((item) => item.email === email && item.flow === 'password-reset');
+  const coolingDown = recent.some((item) => now - item.createdAt < 60 * 1000);
+  const rateLimited = coolingDown || recent.length >= 3;
+  if (rateLimited && activeChallenge) return { status: 202, challengeId: activeChallenge.id };
+
+  const challengeId = randomUUID(); const code = String(randomInt(100000, 1000000));
+  const canSend = Boolean(account) && !rateLimited;
+  const challenge = { id: challengeId, purpose, accountType, email, userId: canSend ? account.id : null, emailOtpHash: hashOtp(challengeId, 'email', code).toString('hex'), attempts: 0, expiresAt: now + 10 * 60 * 1000, createdAt: now };
+  platform.passwordResetChallenges = platform.passwordResetChallenges.filter((item) => !(item.purpose === purpose && item.email === email));
+  platform.passwordResetChallenges.push(challenge);
+  if (!rateLimited) platform.otpSendHistory.push({ email, phone: '', flow: 'password-reset', createdAt: now });
+  await writePlatform(platform);
+  return { status: 202, challengeId, emailCode: canSend ? code : null };
+}
+async function verifyPasswordReset(platform, { challengeId, accountType, emailCode }) {
+  platform.passwordResetChallenges ||= [];
+  const purpose = `${accountType}-password-reset`;
+  const challenge = platform.passwordResetChallenges.find((item) => item.id === challengeId && item.purpose === purpose);
+  const genericError = 'The code is invalid or expired. Request a new password reset code and try again.';
+  if (!challenge || challenge.expiresAt <= Date.now() || challenge.attempts >= 5) return { error: genericError };
+  challenge.attempts += 1;
+  const valid = otpMatches(challenge.id, 'email', emailCode, challenge.emailOtpHash);
+  const user = challenge.userId && (accountType === 'customer' ? platform.customerUsers.find((item) => item.id === challenge.userId) : platform.users.find((item) => item.id === challenge.userId));
+  if (!valid || !user || user.email !== challenge.email || user.active === false) { await writePlatform(platform); return { error: genericError }; }
+  return { challenge, user };
+}
+async function completePasswordReset(platform, { challengeId, accountType, emailCode, password }) {
+  const result = await verifyPasswordReset(platform, { challengeId, accountType, emailCode });
+  if (result.error) return result;
+  const { user } = result; const credentials = hashPassword(password); const now = new Date().toISOString();
+  user.passwordSalt = credentials.salt; user.passwordHash = credentials.hash; user.authVersion = accountAuthVersion(user) + 1; user.passwordUpdatedAt = now; user.emailVerifiedAt ||= now;
+  platform.passwordResetChallenges = platform.passwordResetChallenges.filter((item) => !(item.accountType === accountType && item.email === user.email));
+  await writePlatform(platform);
+  return { user };
 }
 function byStart(a, b) { return `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`); }
 function getService(state, id) { return state.services.find((item) => item.id === id && item.active); }
@@ -353,6 +406,26 @@ app.post('/api/customer/login', async (req, res, next) => {
     res.json({ customerToken: makeCustomerSession(user), customer: { id: user.id, name: user.name, email: user.email, phone: user.phone } });
   } catch (e) { next(e); }
 });
+app.post('/api/customer/password-reset/start', async (req, res, next) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+    const platform = await readPlatform(); const result = await startPasswordReset(platform, { accountType: 'customer', email });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.status(202).json({ challengeId: result.challengeId, expiresInSeconds: 600, message: 'If an account matches that email, a password reset code has been sent.' });
+    if (result.emailCode) sendPasswordResetEmail(email, result.emailCode).catch(() => console.warn('Password reset email delivery failed.'));
+  } catch (e) { next(e); }
+});
+app.post('/api/customer/password-reset/complete', async (req, res, next) => {
+  try {
+    const { challengeId, emailCode, password } = req.body || {};
+    if (typeof password !== 'string' || password.length < 8 || password.length > 128) return res.status(400).json({ error: 'Choose a password between 8 and 128 characters.' });
+    if (!/^\d{6}$/.test(String(emailCode || ''))) return res.status(400).json({ error: 'The code is invalid or expired. Request a new password reset code and try again.' });
+    const platform = await readPlatform(); const result = await completePasswordReset(platform, { challengeId: String(challengeId || ''), accountType: 'customer', emailCode: String(emailCode), password });
+    if (result.error) return res.status(400).json({ error: result.error });
+    res.json({ message: 'Password updated. Sign in with your new password.' });
+  } catch (e) { next(e); }
+});
 app.get('/api/customer/me', async (req, res, next) => {
   try { const platform = await readPlatform(); const user = customerFromRequest(req, platform); if (!user) return res.status(401).json({ error: 'Sign in to continue.' }); res.json({ customer: { id: user.id, name: user.name, email: user.email, phone: user.phone } }); } catch (e) { next(e); }
 });
@@ -395,13 +468,34 @@ app.post('/api/auth/login', async (req, res, next) => {
     if (!user || !passwordMatches(String(req.body?.password || ''), user)) return res.status(401).json({ error: 'Email or password is incorrect.' });
     const organizations = tenantChoices(platform, user);
     if (!organizations.length) return res.status(403).json({ error: 'This account has no active salon workspace.' });
-    res.json({ loginToken: signToken({ type: 'login', userId: user.id, exp: Date.now() + 10 * 60 * 1000 }), user: { id: user.id, name: user.name, email: user.email }, organizations });
+    res.json({ loginToken: signToken({ type: 'login', userId: user.id, authVersion: accountAuthVersion(user), exp: Date.now() + 10 * 60 * 1000 }), user: { id: user.id, name: user.name, email: user.email }, organizations });
+  } catch (e) { next(e); }
+});
+app.post('/api/auth/password-reset/start', async (req, res, next) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+    const platform = await readPlatform(); const result = await startPasswordReset(platform, { accountType: 'partner', email });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.status(202).json({ challengeId: result.challengeId, expiresInSeconds: 600, message: 'If an account matches that email, a password reset code has been sent.' });
+    if (result.emailCode) sendPasswordResetEmail(email, result.emailCode).catch(() => console.warn('Password reset email delivery failed.'));
+  } catch (e) { next(e); }
+});
+app.post('/api/auth/password-reset/complete', async (req, res, next) => {
+  try {
+    const { challengeId, emailCode, password } = req.body || {};
+    if (typeof password !== 'string' || password.length < 8 || password.length > 128) return res.status(400).json({ error: 'Choose a password between 8 and 128 characters.' });
+    if (!/^\d{6}$/.test(String(emailCode || ''))) return res.status(400).json({ error: 'The code is invalid or expired. Request a new password reset code and try again.' });
+    const platform = await readPlatform(); const result = await completePasswordReset(platform, { challengeId: String(challengeId || ''), accountType: 'partner', emailCode: String(emailCode), password });
+    if (result.error) return res.status(400).json({ error: result.error });
+    res.json({ message: 'Password updated. Sign in with your new password.' });
   } catch (e) { next(e); }
 });
 app.post('/api/auth/select', async (req, res, next) => {
   try {
     const auth = verifyToken(req.body?.loginToken); if (auth?.type !== 'login') return res.status(401).json({ error: 'Your sign-in session expired. Please sign in again.' });
     const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === req.body?.tenantId && t.active && t.userIds.includes(user?.id)); const branch = tenant?.branches.find((b) => b.id === req.body?.branchId && b.active);
+    if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your sign-in session expired. Please sign in again.' });
     if (!user || !tenant || !branch) return res.status(403).json({ error: 'You do not have access to this salon location.' });
     res.json({ sessionToken: makeSession(user, tenant, branch), user: { id: user.id, name: user.name, email: user.email }, workspace: { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone }, organizations: tenantChoices(platform, user) });
   } catch (e) { next(e); }
@@ -410,7 +504,8 @@ app.get('/api/auth/me', async (req, res, next) => {
   try {
     const auth = verifyToken(req.get('x-session-token')); if (auth?.type !== 'session') return res.status(401).json({ error: 'Sign in to continue.' });
     const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === auth.tenantId && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === auth.branchId);
-    if (!user || !tenant || !branch) return res.status(401).json({ error: 'This workspace is no longer available.' });
+    if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
+    if (!tenant || !branch) return res.status(401).json({ error: 'This workspace is no longer available.' });
     res.json({ user: { id: user.id, name: user.name, email: user.email }, workspace: { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone }, organizations: tenantChoices(platform, user) });
   } catch (e) { next(e); }
 });
@@ -418,14 +513,15 @@ app.post('/api/auth/switch-context', async (req, res, next) => {
   try {
     const auth = verifyToken(req.get('x-session-token')); if (auth?.type !== 'session') return res.status(401).json({ error: 'Sign in to continue.' });
     const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === req.body?.tenantId && t.active && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === req.body?.branchId && b.active);
-    if (!user || !tenant || !branch) return res.status(403).json({ error: 'You do not have access to this salon location.' });
+    if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
+    if (!tenant || !branch) return res.status(403).json({ error: 'You do not have access to this salon location.' });
     res.json({ sessionToken: makeSession(user, tenant, branch), workspace: { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone } });
   } catch (e) { next(e); }
 });
 app.post('/api/auth/create-organization', async (req, res, next) => {
   try {
     const auth = verifyToken(req.get('x-session-token')); if (auth?.type !== 'session') return res.status(401).json({ error: 'Sign in to continue.' });
-    const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); if (!user) return res.status(401).json({ error: 'Account not found.' });
+    const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     const { tenant, branch } = await createTenantForUser(platform, user, req.body || {}); await writePlatform(platform);
     res.status(201).json({ sessionToken: makeSession(user, tenant, branch), workspace: { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone } });
   } catch (e) { if (e.message.startsWith('Enter a business') || e.message.startsWith('Choose a')) return res.status(400).json({ error: e.message }); next(e); }
@@ -438,7 +534,7 @@ app.use('/api', async (req, res, next) => {
       const auth = verifyToken(req.get('x-session-token'));
       if (auth?.type !== 'session') return res.status(401).json({ error: 'Please sign in to a salon workspace.' });
       const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === auth.tenantId && t.active && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === auth.branchId && b.active);
-      if (!user || !tenant || !branch) return res.status(401).json({ error: 'This workspace session is no longer valid.' });
+      if (!user || !authVersionMatches(auth, user) || !tenant || !branch) return res.status(401).json({ error: 'This workspace session is no longer valid. Please sign in again.' });
       return scopeStorage.run({ platform, user, tenant, branch, session: auth }, next);
     }
     const slug = String(req.get('x-salon-slug') || req.query.salon || 'forme').toLowerCase(); const tenant = platform.tenants.find((t) => t.slug === slug && t.active);

@@ -8,7 +8,9 @@ const localDate = () => { const parts = new Intl.DateTimeFormat('en-CA', { timeZ
 const tokenKey = 'formeSessionToken';
 const partnerChallengeKey = 'formePartnerRegistrationChallenge';
 const customerChallengeKey = 'formeCustomerRegistrationChallenge';
-let activeUser = null, activeWorkspace = null, organizations = [], pendingLoginToken = '', pendingPartnerChallengeId = '', pendingCustomerChallengeId = '', authMode = 'login', addingOrganization = false;
+const partnerResetChallengeKey = 'formePartnerPasswordResetChallenge';
+const customerResetChallengeKey = 'formeCustomerPasswordResetChallenge';
+let activeUser = null, activeWorkspace = null, organizations = [], pendingLoginToken = '', pendingPartnerChallengeId = '', pendingCustomerChallengeId = '', pendingPartnerResetChallengeId = '', pendingCustomerResetChallengeId = '', authMode = 'login', addingOrganization = false;
 const directSalonLink = new URLSearchParams(location.search).has('salon');
 let publicContext = { salon: new URLSearchParams(location.search).get('salon') || 'forme', branch: new URLSearchParams(location.search).get('branch') || '' };
 let services = [];
@@ -221,7 +223,7 @@ $('#manageDate').addEventListener('change', async () => {
 
 function openAdmin(create = false) { $('#adminShell').hidden = false; document.body.style.overflow = 'hidden'; addingOrganization = Boolean(create && sessionStorage.getItem(tokenKey)); setAuthMode(create ? 'register' : 'login'); if (sessionStorage.getItem(tokenKey) && !addingOrganization) resumeSession(); }
 function closeAdmin() { document.body.style.overflow = ''; navigate('/'); }
-function setAuthMode(mode) { authMode = mode; pendingPartnerChallengeId = ''; if(mode!=='register')sessionStorage.removeItem(partnerChallengeKey); $('#partnerVerifyPanel').hidden = true; $('#authSubmit').hidden = false; const creating = mode === 'register'; $('#authTitle').textContent = addingOrganization ? 'Add another salon brand.' : creating ? 'Open your salon workspace.' : 'Welcome back.'; $('#authIntro').textContent = addingOrganization ? 'Create another brand under your owner account.' : creating ? 'Create your owner account and first location.' : 'Sign in to your salon workspace.'; $('#authCreateFields').hidden = !creating; $('#ownerNameLabel').hidden = addingOrganization; $('#partnerPhoneLabel').hidden = addingOrganization; $('#adminLogin').querySelector('[name="name"]').required = creating && !addingOrganization; $('#adminLogin').querySelector('[name="phone"]').required = creating && !addingOrganization; $('#authToggle').hidden = addingOrganization; $('#adminLogin [name="email"]').required = !addingOrganization; $('#adminLogin [name="password"]').required = !addingOrganization; $('#adminLogin [name="password"]').minLength = addingOrganization ? 0 : 8; $('#adminLogin [name="email"]').closest('label').hidden = addingOrganization; $('#adminLogin [name="password"]').closest('label').hidden = addingOrganization; $('#authToggle').textContent = creating ? 'Already have a workspace? Sign in' : 'New to FORME? Create a salon account'; $('#authSubmit').textContent = addingOrganization ? 'Add salon brand' : creating ? 'Create salon workspace' : 'Sign in'; $('#workspaceChooser').hidden = true; $('#adminLogin').querySelector('[name="country"]').required = creating; $('#adminLogin').querySelector('[name="timeZone"]').required = creating; $('#adminLogin').querySelector('[name="businessName"]').required = creating; $('#adminLogin').querySelector('[name="branchName"]').required = creating; showMessage($('#adminMessage'), ''); }
+function setAuthMode(mode) { authMode = mode; pendingPartnerChallengeId = ''; if(mode!=='register')sessionStorage.removeItem(partnerChallengeKey); $('#partnerPasswordResetPanel').hidden = true; $('#adminLogin').hidden = false; $('#partnerForgotPasswordButton').hidden = mode === 'register' || addingOrganization; $('#partnerVerifyPanel').hidden = true; $('#authSubmit').hidden = false; const creating = mode === 'register'; $('#authTitle').textContent = addingOrganization ? 'Add another salon brand.' : creating ? 'Open your salon workspace.' : 'Welcome back.'; $('#authIntro').textContent = addingOrganization ? 'Create another brand under your owner account.' : creating ? 'Create your owner account and first location.' : 'Sign in to your salon workspace.'; $('#authCreateFields').hidden = !creating; $('#ownerNameLabel').hidden = addingOrganization; $('#partnerPhoneLabel').hidden = addingOrganization; $('#adminLogin').querySelector('[name="name"]').required = creating && !addingOrganization; $('#adminLogin').querySelector('[name="phone"]').required = creating && !addingOrganization; $('#authToggle').hidden = addingOrganization; $('#adminLogin [name="email"]').required = !addingOrganization; $('#adminLogin [name="password"]').required = !addingOrganization; $('#adminLogin [name="password"]').minLength = addingOrganization ? 0 : 8; $('#adminLogin [name="email"]').closest('label').hidden = addingOrganization; $('#adminLogin [name="password"]').closest('label').hidden = addingOrganization; $('#authToggle').textContent = creating ? 'Already have a workspace? Sign in' : 'New to FORME? Create a salon account'; $('#authSubmit').textContent = addingOrganization ? 'Add salon brand' : creating ? 'Create salon workspace' : 'Sign in'; $('#workspaceChooser').hidden = true; $('#adminLogin').querySelector('[name="country"]').required = creating; $('#adminLogin').querySelector('[name="timeZone"]').required = creating; $('#adminLogin').querySelector('[name="businessName"]').required = creating; $('#adminLogin').querySelector('[name="branchName"]').required = creating; showMessage($('#adminMessage'), ''); }
 async function resumeSession() { try { const info = await api('/api/auth/me'); activeUser=info.user; activeWorkspace=info.workspace; organizations=info.organizations; await finishWorkspace(); } catch { sessionStorage.removeItem(tokenKey); } }
 async function finishWorkspace() { $('#adminGate').hidden = true; $('#dashboard').hidden = false; $('#userAvatar').textContent = (activeUser?.name || 'F')[0].toUpperCase(); renderWorkspaceSelectors(); applyWorkspaceLocale(); const bookingUrl=`/salon/${encodeURIComponent(activeWorkspace.tenantSlug)}/booking?branch=${encodeURIComponent(activeWorkspace.branchId)}`; $('#studioBookingLink').href=bookingUrl; $('#studioNewBookingLink').href=bookingUrl; const route=resolveRoute(); if(route.name!=='studio') navigate('/studio/overview'); else enterDashboard(); }
 function applyWorkspaceLocale() { const org=organizations.find(o=>o.id===activeWorkspace?.tenantId); const branch=org?.branches.find(b=>b.id===activeWorkspace?.branchId); if(!branch)return; currentCurrency=branch.currency||'INR';currentTimeZone=branch.timeZone||'Etc/UTC';currentLocale=({INR:'en-IN',USD:'en-US',GBP:'en-GB',EUR:'en-IE',AED:'en-AE',SGD:'en-SG',CAD:'en-CA',AUD:'en-AU'})[currentCurrency]||'en'; $('#dateInput').value=localDate();$('#manageDate').value=localDate(); }
@@ -230,6 +232,35 @@ async function changeWorkspace(tenantId, branchId) { const org=organizations.fin
 
 $('#adminClose').addEventListener('click', closeAdmin); $('#adminShell').addEventListener('click', (e) => { if (e.target === $('#adminShell')) closeAdmin(); });
 $('#authToggle').addEventListener('click', () => navigate(authMode === 'login' ? '/partner/signup' : '/partner/login'));
+$('#partnerForgotPasswordButton').addEventListener('click', () => {
+  pendingPartnerResetChallengeId = ''; sessionStorage.removeItem(partnerResetChallengeKey);
+  const email = $('#adminLogin [name="email"]').value.trim(); if (email) $('#partnerResetEmail').value = email;
+  $('#adminLogin').hidden = true; $('#authToggle').hidden = true; $('#workspaceChooser').hidden = true; $('#partnerPasswordResetPanel').hidden = false;
+  $('#partnerResetRequestPane').hidden = false; $('#partnerResetCompletePane').hidden = true; $('#authTitle').textContent = 'Reset your password.'; $('#authIntro').textContent = 'We will email a one-time code if an account matches.'; showMessage($('#partnerResetMessage'), '');
+});
+$('#partnerResetRequestButton').addEventListener('click', async () => {
+  const button = $('#partnerResetRequestButton'); button.disabled = true;
+  try {
+    const email = $('#partnerResetEmail').value.trim(); const result = await api('/api/auth/password-reset/start', { method: 'POST', body: JSON.stringify({ email }) });
+    pendingPartnerResetChallengeId = result.challengeId; sessionStorage.setItem(partnerResetChallengeKey, JSON.stringify({ challengeId: result.challengeId, email, expiresAt: Date.now() + result.expiresInSeconds * 1000 }));
+    $('#partnerResetRequestPane').hidden = true; $('#partnerResetCompletePane').hidden = false; showMessage($('#partnerResetMessage'), 'If the account exists, a code was sent to its email. Check your inbox and spam folder.');
+  } catch (error) { showMessage($('#partnerResetMessage'), error.message, true); }
+  finally { button.disabled = false; }
+});
+$('#partnerResetCompleteButton').addEventListener('click', async () => {
+  const code = $('#partnerResetCode').value.trim(); const password = $('#partnerResetPassword').value; const confirmation = $('#partnerResetPasswordConfirm').value;
+  if (!/^\d{6}$/.test(code)) return showMessage($('#partnerResetMessage'), 'Enter the six-digit email code.', true);
+  if (password.length < 8 || password.length > 128) return showMessage($('#partnerResetMessage'), 'Choose a password between 8 and 128 characters.', true);
+  if (password !== confirmation) return showMessage($('#partnerResetMessage'), 'The passwords do not match.', true);
+  const button = $('#partnerResetCompleteButton'); button.disabled = true;
+  try {
+    await api('/api/auth/password-reset/complete', { method: 'POST', body: JSON.stringify({ challengeId: pendingPartnerResetChallengeId, emailCode: code, password }) });
+    sessionStorage.removeItem(partnerResetChallengeKey); pendingPartnerResetChallengeId = ''; $('#adminLogin [name="email"]').value = $('#partnerResetEmail').value.trim(); $('#adminLogin [name="password"]').value = ''; $('#partnerResetCode').value = ''; $('#partnerResetPassword').value = ''; $('#partnerResetPasswordConfirm').value = '';
+    $('#partnerPasswordResetPanel').hidden = true; $('#adminLogin').hidden = false; setAuthMode('login'); showMessage($('#adminMessage'), 'Password updated. Sign in with your new password.');
+  } catch (error) { showMessage($('#partnerResetMessage'), error.message, true); }
+  finally { button.disabled = false; }
+});
+$('#partnerResetBackButton').addEventListener('click', () => { sessionStorage.removeItem(partnerResetChallengeKey); pendingPartnerResetChallengeId = ''; $('#partnerPasswordResetPanel').hidden = true; $('#adminLogin').hidden = false; setAuthMode('login'); });
 $('#adminLogout').addEventListener('click', () => { sessionStorage.removeItem(tokenKey); activeUser=null;activeWorkspace=null; $('#dashboard').hidden=true;$('#adminGate').hidden=false;$('#adminLogin').reset();setAuthMode('login');showMessage($('#adminMessage'),'You’re signed out.'); });
 $('#adminLogin').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const payload = Object.fromEntries(new FormData(form));
@@ -453,6 +484,36 @@ $$('[data-customer-mode]').forEach(button=>button.addEventListener('click',()=>{
 function setCustomerSession(customer){sessionStorage.setItem('salonCustomerToken',customer.customerToken||sessionStorage.getItem('salonCustomerToken'));$('#customerSignupButton').disabled=false;$('#customerVerifyButton').disabled=false;$('#customerAuthPanel').hidden=true;$('#customerSessionPanel').hidden=false;$('#customerGreeting').textContent=`Hi, ${customer.name}`;$('#bookingForm').elements.name.value=customer.name;$('#bookingForm').elements.phone.value=customer.phone;showMessage($('#customerAuthMessage'),'');loadMyBookings().catch(error=>notify(error.message,true));}
 async function restoreCustomerSession(){if(!sessionStorage.getItem('salonCustomerToken'))return;try{const result=await api('/api/customer/me');setCustomerSession(result.customer);}catch{sessionStorage.removeItem('salonCustomerToken');}}
 $('#customerLoginButton').addEventListener('click',async()=>{try{const result=await api('/api/customer/login',{method:'POST',body:JSON.stringify({email:$('#customerLoginEmail').value,password:$('#customerLoginPassword').value})});sessionStorage.setItem('salonCustomerToken',result.customerToken);setCustomerSession(result.customer);}catch(error){showMessage($('#customerAuthMessage'),error.message,true);}});
+$('#customerForgotPasswordButton').addEventListener('click', () => {
+  pendingCustomerResetChallengeId = ''; sessionStorage.removeItem(customerResetChallengeKey);
+  if ($('#customerLoginEmail').value.trim()) $('#customerResetEmail').value = $('#customerLoginEmail').value.trim();
+  $('#customerAuthPanel').hidden = true; $('#customerPasswordResetPane').hidden = false; $('#customerResetRequestPane').hidden = false; $('#customerResetCompletePane').hidden = true; showMessage($('#customerResetMessage'), '');
+});
+$('#customerResetRequestButton').addEventListener('click', async () => {
+  const button = $('#customerResetRequestButton'); button.disabled = true;
+  try {
+    const email = $('#customerResetEmail').value.trim(); const result = await api('/api/customer/password-reset/start', { method: 'POST', body: JSON.stringify({ email }) });
+    pendingCustomerResetChallengeId = result.challengeId; sessionStorage.setItem(customerResetChallengeKey, JSON.stringify({ challengeId: result.challengeId, email, expiresAt: Date.now() + result.expiresInSeconds * 1000 }));
+    $('#customerResetRequestPane').hidden = true; $('#customerResetCompletePane').hidden = false; showMessage($('#customerResetMessage'), 'If the account exists, a code was sent to its email. Check your inbox and spam folder.');
+  } catch (error) { showMessage($('#customerResetMessage'), error.message, true); }
+  finally { button.disabled = false; }
+});
+$('#customerResetCompleteButton').addEventListener('click', async () => {
+  const code = $('#customerResetCode').value.trim(); const password = $('#customerResetPassword').value; const confirmation = $('#customerResetPasswordConfirm').value;
+  if (!/^\d{6}$/.test(code)) return showMessage($('#customerResetMessage'), 'Enter the six-digit email code.', true);
+  if (password.length < 8 || password.length > 128) return showMessage($('#customerResetMessage'), 'Choose a password between 8 and 128 characters.', true);
+  if (password !== confirmation) return showMessage($('#customerResetMessage'), 'The passwords do not match.', true);
+  const button = $('#customerResetCompleteButton'); button.disabled = true;
+  try {
+    await api('/api/customer/password-reset/complete', { method: 'POST', body: JSON.stringify({ challengeId: pendingCustomerResetChallengeId, emailCode: code, password }) });
+    sessionStorage.removeItem(customerResetChallengeKey); pendingCustomerResetChallengeId = ''; $('#customerLoginEmail').value = $('#customerResetEmail').value.trim(); $('#customerLoginPassword').value = ''; $('#customerResetCode').value = ''; $('#customerResetPassword').value = ''; $('#customerResetPasswordConfirm').value = '';
+    $('#customerPasswordResetPane').hidden = true; $('#customerAuthPanel').hidden = false; $('#customerLoginPane').hidden = false; $('#customerSignupPane').hidden = true; $('#customerVerifyPane').hidden = true; customerAuthMode = 'login'; $$('[data-customer-mode]').forEach(tab => { tab.disabled = false; tab.classList.toggle('active', tab.dataset.customerMode === 'login'); }); showMessage($('#customerAuthMessage'), 'Password updated. Sign in with your new password.');
+  } catch (error) { showMessage($('#customerResetMessage'), error.message, true); }
+  finally { button.disabled = false; }
+});
+$('#customerResetBackButton').addEventListener('click', () => {
+  sessionStorage.removeItem(customerResetChallengeKey); pendingCustomerResetChallengeId = ''; $('#customerPasswordResetPane').hidden = true; $('#customerAuthPanel').hidden = false; $('#customerLoginPane').hidden = false; $('#customerSignupPane').hidden = true; $('#customerVerifyPane').hidden = true; customerAuthMode = 'login'; $$('[data-customer-mode]').forEach(tab => { tab.disabled = false; tab.classList.toggle('active', tab.dataset.customerMode === 'login'); }); showMessage($('#customerAuthMessage'), '');
+});
 $('#customerSignupButton').addEventListener('click', async () => {
   $('#customerSignupButton').disabled = true;
   try {
@@ -480,6 +541,14 @@ renderRoute();
 function restoreRegistrationChallenges() {
   const route = resolveRoute();
   try {
+    const partnerReset = JSON.parse(sessionStorage.getItem(partnerResetChallengeKey) || 'null');
+    if (partnerReset && partnerReset.expiresAt > Date.now() && route.name === 'partner-login') {
+      pendingPartnerResetChallengeId = partnerReset.challengeId; $('#partnerResetEmail').value = partnerReset.email || ''; $('#adminLogin').hidden = true; $('#authToggle').hidden = true; $('#workspaceChooser').hidden = true; $('#partnerPasswordResetPanel').hidden = false; $('#partnerResetRequestPane').hidden = true; $('#partnerResetCompletePane').hidden = false; $('#authTitle').textContent = 'Reset your password.'; $('#authIntro').textContent = 'We will email a one-time code if an account matches.'; showMessage($('#partnerResetMessage'), 'Enter the code from your email to continue.');
+    } else if (partnerReset && partnerReset.expiresAt <= Date.now()) sessionStorage.removeItem(partnerResetChallengeKey);
+    const customerReset = JSON.parse(sessionStorage.getItem(customerResetChallengeKey) || 'null');
+    if (customerReset && customerReset.expiresAt > Date.now() && ['home', 'account', 'booking', 'salon'].includes(route.name)) {
+      pendingCustomerResetChallengeId = customerReset.challengeId; $('#customerResetEmail').value = customerReset.email || ''; $('#customerAuthPanel').hidden = true; $('#customerPasswordResetPane').hidden = false; $('#customerResetRequestPane').hidden = true; $('#customerResetCompletePane').hidden = false; showMessage($('#customerResetMessage'), 'Enter the code from your email to continue.');
+    } else if (customerReset && customerReset.expiresAt <= Date.now()) sessionStorage.removeItem(customerResetChallengeKey);
     const partner = JSON.parse(sessionStorage.getItem(partnerChallengeKey) || 'null');
     if (partner && partner.expiresAt > Date.now() && route.name === 'partner-signup') {
       pendingPartnerChallengeId = partner.challengeId; $('#partnerOtpDestinations').textContent = `${partner.emailHint} and ${partner.phoneHint}`; $('#authCreateFields').hidden = true; $('#authSubmit').hidden = true; $('#authToggle').hidden = true; $('#partnerVerifyPanel').hidden = false; showMessage($('#adminMessage'), 'Enter both codes to finish creating your salon workspace.');
@@ -488,7 +557,7 @@ function restoreRegistrationChallenges() {
     if (customer && customer.expiresAt > Date.now() && ['account', 'booking'].includes(route.name)) {
       pendingCustomerChallengeId = customer.challengeId; $('#customerOtpDestinations').textContent = `${customer.emailHint} and ${customer.phoneHint}`; $('#customerLoginPane').hidden = true; $('#customerSignupPane').hidden = true; $('#customerVerifyPane').hidden = false; $$('[data-customer-mode]').forEach(tab=>{tab.disabled=true;tab.classList.toggle('active',tab.dataset.customerMode==='signup');}); customerAuthMode = 'signup'; showMessage($('#customerAuthMessage'), 'Enter both codes to finish creating your FORME account.');
     } else if (customer && customer.expiresAt <= Date.now()) sessionStorage.removeItem(customerChallengeKey);
-  } catch { sessionStorage.removeItem(partnerChallengeKey); sessionStorage.removeItem(customerChallengeKey); }
+  } catch { sessionStorage.removeItem(partnerChallengeKey); sessionStorage.removeItem(customerChallengeKey); sessionStorage.removeItem(partnerResetChallengeKey); sessionStorage.removeItem(customerResetChallengeKey); }
 }
 restoreRegistrationChallenges();
 if(sessionStorage.getItem(tokenKey)&&resolveRoute().name==='studio')resumeSession();
