@@ -341,7 +341,7 @@ $('#adminLogin').addEventListener('submit', async (event) => {
 $('#partnerVerifyButton').addEventListener('click', async () => {
   const emailCode = $('#partnerEmailCode').value.trim(); const smsCode = $('#partnerSmsCode').value.trim();
   if (!/^\d{6}$/.test(emailCode) || !/^\d{6}$/.test(smsCode)) return showMessage($('#adminMessage'), 'Enter the 6-digit OTP from your email and SMS.', true);
-  $('#partnerVerifyButton').disabled = true; showMessage($('#adminMessage'), 'Checking your email and mobile OTPs?');
+  $('#partnerVerifyButton').disabled = true; showMessage($('#adminMessage'), 'Verifying your email and mobile OTPs...');
   try {
     const result = await api('/api/auth/verify-registration', { method: 'POST', body: JSON.stringify({ challengeId: pendingPartnerChallengeId, emailCode, smsCode }) });
     sessionStorage.removeItem(partnerChallengeKey); sessionStorage.setItem(tokenKey, result.sessionToken); activeUser = result.user; activeWorkspace = result.workspace; organizations = result.organizations; pendingPartnerChallengeId = ''; await finishWorkspace();
