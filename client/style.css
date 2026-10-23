@@ -164,3 +164,19 @@ a,button,input,select,textarea{-webkit-tap-highlight-color:transparent}
   .toolbar-actions .button{min-width:110px}
 }
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{scroll-behavior:auto!important;transition-duration:.01ms!important;animation-duration:.01ms!important;animation-iteration-count:1!important}}
+
+/* Plain-language guidance for customers and salon owners */
+.form-help{margin:.1rem 0 .75rem;padding:.85rem 1rem;border:1px solid #e4e9dc;border-radius:10px;background:#f4f6ef;color:#596451;font-size:.84rem;line-height:1.6}
+.field-help{display:block;margin:.2rem 0 0;color:#70786d;font-size:.76rem;font-weight:400;line-height:1.5;letter-spacing:0}
+.partner-how{padding-top:3.5rem;padding-bottom:4.5rem}
+.partner-how>h2{max-width:720px;margin:.55rem 0 1.5rem;font:500 clamp(2rem,4vw,3rem)/1.1 'Playfair Display',serif;letter-spacing:-.03em}
+.partner-how-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1rem}
+.partner-how-grid article{padding:1.35rem;border:1px solid #e5e2da;border-radius:14px;background:#fff;box-shadow:0 8px 24px #17211c08}
+.partner-how-grid i{display:grid;width:34px;height:34px;place-items:center;border-radius:50%;background:#eff2e8;color:#687a56;font-size:.74rem;font-style:normal;font-weight:700}
+.partner-how-grid h3{margin:.85rem 0 .45rem;font-size:1rem;line-height:1.35}
+.partner-how-grid p{margin:0;color:#70766e;font-size:.87rem;line-height:1.65}
+.booking-note{font-size:.86rem;line-height:1.65}
+.deposit-policy{font-size:.84rem;line-height:1.6}
+.market-proof,.directory-subtitle{line-height:1.6}
+@media(max-width:900px){.partner-how-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:520px){.partner-how{padding-top:2.8rem;padding-bottom:3.2rem}.partner-how-grid{grid-template-columns:1fr}.partner-how-grid article{padding:1.1rem}.form-help{font-size:.82rem}}
