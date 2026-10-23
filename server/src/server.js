@@ -265,18 +265,36 @@ function otpMatches(challengeId, channel, value, expectedHex) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 async function sendVerificationEmail(email, code) {
-  const response = await fetch('https://api.resend.com/emails', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.OTP_EMAIL_FROM, to: [email], subject: 'Your FORME verification code', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Verify your FORME account</h2><p>Your email verification code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request it, you can ignore this email.</p></div>` }) });
-  if (!response.ok) throw new Error('Email delivery failed.');
+  let response;
+  try {
+    response = await fetch('https://api.resend.com/emails', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.OTP_EMAIL_FROM, to: [email], subject: 'Your FORME verification code', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Verify your FORME account</h2><p>Your email verification code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request it, you can ignore this email.</p></div>` }) });
+  } catch {
+    throw Object.assign(new Error('Email verification service is unavailable.'), { deliveryChannel: 'email' });
+  }
+  if (!response.ok) throw Object.assign(new Error('Email provider rejected verification.'), { deliveryChannel: 'email', providerStatus: response.status });
 }
 async function sendPasswordResetEmail(email, code) {
   const response = await fetch('https://api.resend.com/emails', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.OTP_EMAIL_FROM, to: [email], subject: 'Reset your FORME password', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Reset your FORME password</h2><p>Your password reset code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request a password reset, you can ignore this email.</p></div>` }) });
   if (!response.ok) throw new Error('Email delivery failed.');
 }
 async function sendVerificationSms(phone, code) {
-  const response = await fetch('https://control.msg91.com/api/v5/flow', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { authkey: process.env.MSG91_AUTH_KEY, accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ template_id: process.env.MSG91_OTP_TEMPLATE_ID, short_url: '0', recipients: [{ mobiles: phone.replace('+', ''), VAR1: code }] }) });
-  if (!response.ok) throw new Error('SMS delivery failed.');
+  let response;
+  try {
+    response = await fetch('https://control.msg91.com/api/v5/flow', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { authkey: process.env.MSG91_AUTH_KEY, accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ template_id: process.env.MSG91_OTP_TEMPLATE_ID, short_url: '0', recipients: [{ mobiles: phone.replace('+', ''), VAR1: code }] }) });
+  } catch {
+    throw Object.assign(new Error('SMS verification service is unavailable.'), { deliveryChannel: 'sms' });
+  }
+  if (!response.ok) throw Object.assign(new Error('SMS provider rejected verification.'), { deliveryChannel: 'sms', providerStatus: response.status });
   const result = await response.json().catch(() => ({}));
-  if (String(result.type || '').toLowerCase() === 'error' || String(result.status || '').toLowerCase() === 'error') throw new Error('SMS delivery failed.');
+  if (String(result.type || '').toLowerCase() === 'error' || String(result.status || '').toLowerCase() === 'error') throw Object.assign(new Error('SMS provider rejected verification.'), { deliveryChannel: 'sms', providerStatus: response.status });
+}
+function registrationDeliveryError(error) {
+  if (error.deliveryChannel === 'email' && error.providerStatus === 403) return 'Email OTP was blocked by Resend. For testing, use the email address on the Resend account, or verify a sender domain and set OTP_EMAIL_FROM to an address on that domain.';
+  if (error.deliveryChannel === 'email' && error.providerStatus === 401) return 'Email OTP could not be authorized. Check the Resend API key in Render.';
+  if (error.deliveryChannel === 'email') return 'Email OTP could not be sent. Check Resend email logs and try again.';
+  if (error.deliveryChannel === 'sms' && [401, 403].includes(error.providerStatus)) return 'SMS OTP was rejected. Check the MSG91 key, approved DLT template, sender ID and template ID.';
+  if (error.deliveryChannel === 'sms') return 'SMS OTP could not be sent. Check the MSG91 delivery settings and try again.';
+  return 'We could not deliver both verification codes. Check the email and phone number, then try again shortly.';
 }
 async function startRegistrationVerification(platform, { purpose, email, phone, registration }) {
   if (!otpConfigurationReady()) return { status: 503, error: 'Signup verification is not configured yet. Please contact the salon platform administrator.' };
@@ -289,8 +307,15 @@ async function startRegistrationVerification(platform, { purpose, email, phone, 
   platform.registrationChallenges = platform.registrationChallenges.filter((item) => !(item.purpose === purpose && item.email === email) && item.expiresAt > now);
   const challengeRecord = { id: challengeId, purpose, email, phone, emailOtpHash: hashOtp(challengeId, 'email', emailCode).toString('hex'), phoneOtpHash: hashOtp(challengeId, 'phone', phoneCode).toString('hex'), registration, attempts: 0, expiresAt: now + 10 * 60 * 1000, createdAt: now };
   platform.registrationChallenges.push(challengeRecord); platform.otpSendHistory.push({ email, phone, flow: 'signup', createdAt: now }); await writePlatform(platform);
-  try { await Promise.all([sendVerificationEmail(email, emailCode), sendVerificationSms(phone, phoneCode)]); }
-  catch { platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.id !== challengeId); await writePlatform(platform); return { status: 502, error: 'We could not deliver both verification codes. Check the email and phone number, then try again shortly.' }; }
+  try {
+    await sendVerificationEmail(email, emailCode);
+    await sendVerificationSms(phone, phoneCode);
+  } catch (error) {
+    console.warn('Signup OTP delivery failed.', { channel: error.deliveryChannel || 'unknown', providerStatus: error.providerStatus || null });
+    platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.id !== challengeId);
+    await writePlatform(platform);
+    return { status: 502, error: registrationDeliveryError(error) };
+  }
   return { status: 200, challengeId, emailHint: maskedEmail(email), phoneHint: maskedPhone(phone), expiresInSeconds: 600 };
 }
 async function verifyRegistrationCodes(platform, { challengeId, purpose, emailCode, phoneCode }) {
