@@ -3,6 +3,7 @@ services:
     name: forme-salon-marketplace
     runtime: node
     plan: free
+    region: singapore
     buildCommand: npm --prefix server ci
     startCommand: npm --prefix server start
     healthCheckPath: /api/health
@@ -11,5 +12,17 @@ services:
         value: 20
       - key: SESSION_SECRET
         generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: forme-postgres
+          property: connectionString
       - key: PORT
         value: 10000
+
+databases:
+  - name: forme-postgres
+    plan: free
+    region: singapore
+    postgresMajorVersion: "18"
+    databaseName: forme_platform
+    user: forme_app

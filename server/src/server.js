@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import pg from 'pg';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID, randomBytes, randomInt, timingSafeEqual, createHmac, scryptSync } from 'node:crypto';
@@ -13,6 +14,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const dataFile = path.resolve(process.env.DATA_FILE || path.join(here, '../data/studio.json'));
 const platformFile = path.resolve(process.env.PLATFORM_FILE || path.join(here, '../data/platform.json'));
 const dataRoot = path.dirname(dataFile);
+const { Pool } = pg;
+const databasePool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, max: 5, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30000, allowExitOnIdle: true }) : null;
+let databaseSetup;
 const clientDir = path.resolve(here, '../../client');
 const sessionSecret = process.env.SESSION_SECRET || 'local-prototype-session-secret-change-before-deploy';
 const scopeStorage = new AsyncLocalStorage();
@@ -33,21 +37,66 @@ const initialState = (overrides = {}) => {
   });
 };
 
+function stateDocumentKey(scope) {
+  if (!scope || scope.branch?.isDefault) return 'studio:default';
+  return `studio:${scope.tenant.id}:${scope.branch.id}`;
+}
+
+async function ensureDatabase() {
+  if (!databasePool) return;
+  databaseSetup ||= databasePool.query(`
+    CREATE TABLE IF NOT EXISTS forme_documents (
+      document_key TEXT PRIMARY KEY,
+      payload JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `).catch((error) => { databaseSetup = null; throw error; });
+  await databaseSetup;
+}
+
+async function readDocument(key) {
+  await ensureDatabase();
+  const { rows } = await databasePool.query('SELECT payload FROM forme_documents WHERE document_key = $1', [key]);
+  return rows[0]?.payload ?? null;
+}
+
+async function createDocumentIfMissing(key, value) {
+  await ensureDatabase();
+  await databasePool.query('INSERT INTO forme_documents (document_key, payload) VALUES ($1, $2::jsonb) ON CONFLICT (document_key) DO NOTHING', [key, JSON.stringify(value)]);
+  return readDocument(key);
+}
+
+async function writeDocument(key, value) {
+  await ensureDatabase();
+  await databasePool.query(`
+    INSERT INTO forme_documents (document_key, payload) VALUES ($1, $2::jsonb)
+    ON CONFLICT (document_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
+  `, [key, JSON.stringify(value)]);
+}
+
 function pathForScope(scope) {
   if (!scope || scope.branch?.isDefault) return dataFile;
   return path.join(dataRoot, 'tenants', scope.tenant.id, `${scope.branch.id}.json`);
 }
 
 async function readStateFor(scope) {
+  const overrides = scope?.branch ? { branchName: scope.branch.name, city: scope.branch.city, country: scope.branch.country, currency: scope.branch.currency, timeZone: scope.branch.timeZone, businessName: scope.tenant.name } : {};
+  const key = stateDocumentKey(scope);
+  if (databasePool) {
+    const stored = await readDocument(key) ?? await createDocumentIfMissing(key, initialState(overrides));
+    if (Array.isArray(stored)) return { ...initialState(overrides), appointments: stored };
+    const base = initialState(overrides);
+    return { ...base, ...stored, settings: { ...base.settings, ...(stored.settings || {}) } };
+  }
   const file = pathForScope(scope);
   try {
     const stored = JSON.parse(await fs.readFile(file, 'utf8'));
-    if (Array.isArray(stored)) return { ...initialState(scope?.branch ? { branchName: scope.branch.name, city: scope.branch.city, country: scope.branch.country, currency: scope.branch.currency, timeZone: scope.branch.timeZone, businessName: scope.tenant.name } : {}), appointments: stored };
-    const base = initialState(scope?.branch ? { branchName: scope.branch.name, city: scope.branch.city, country: scope.branch.country, currency: scope.branch.currency, timeZone: scope.branch.timeZone, businessName: scope.tenant.name } : {});
+    if (Array.isArray(stored)) return { ...initialState(overrides), appointments: stored };
+    const base = initialState(overrides);
     return { ...base, ...stored, settings: { ...base.settings, ...(stored.settings || {}) } };
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    const state = initialState(scope?.branch ? { branchName: scope.branch.name, city: scope.branch.city, country: scope.branch.country, currency: scope.branch.currency, timeZone: scope.branch.timeZone, businessName: scope.tenant.name } : {});
+    const state = initialState(overrides);
     await writeStateFor(scope, state);
     return state;
   }
@@ -56,6 +105,7 @@ async function readStateFor(scope) {
 function readState() { return readStateFor(scopeStorage.getStore()); }
 
 async function writeStateFor(scope, state) {
+  if (databasePool) return writeDocument(stateDocumentKey(scope), state);
   const file = pathForScope(scope);
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.tmp`;
@@ -92,12 +142,22 @@ function verifyToken(token) {
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function slugify(value) { return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'salon'; }
 async function writePlatform(platform) {
+  if (databasePool) return writeDocument('platform', platform);
   await fs.mkdir(path.dirname(platformFile), { recursive: true });
   const temp = `${platformFile}.tmp`;
   await fs.writeFile(temp, JSON.stringify(platform, null, 2), 'utf8');
   await fs.rename(temp, platformFile);
 }
 async function readPlatform() {
+  if (databasePool) {
+    const platform = await readDocument('platform') ?? await createDocumentIfMissing('platform', { users: [], customerUsers: [], tenants: [], registrationChallenges: [], passwordResetChallenges: [], otpSendHistory: [] });
+    platform.users ||= []; platform.customerUsers ||= []; platform.tenants ||= []; platform.registrationChallenges ||= []; platform.passwordResetChallenges ||= []; platform.otpSendHistory ||= [];
+    const now = Date.now(); const challengeCount = platform.registrationChallenges.length; const historyCount = platform.otpSendHistory.length;
+    platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.expiresAt > now);
+    platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
+    if (challengeCount !== platform.registrationChallenges.length || historyCount !== platform.otpSendHistory.length) await writePlatform(platform);
+    return platform;
+  }
   try {
     const platform = JSON.parse(await fs.readFile(platformFile, 'utf8')); platform.customerUsers ||= []; platform.registrationChallenges ||= []; platform.passwordResetChallenges ||= []; platform.otpSendHistory ||= [];
     const now = Date.now(); const challengeCount = platform.registrationChallenges.length; const historyCount = platform.otpSendHistory.length;
@@ -323,7 +383,14 @@ function assignStaff(state, date, time, service, preferredId, excludeId = null) 
 }
 function makeReference() { return randomBytes(4).toString('hex').toUpperCase(); }
 
-app.get('/api/health', (_req, res) => res.json({ status: 'ok', app: 'FORME Salon Cloud' }));
+app.get('/api/health', async (_req, res) => {
+  try {
+    if (databasePool) { await ensureDatabase(); await databasePool.query('SELECT 1'); }
+    res.json({ status: 'ok', app: 'FORME Salon Cloud', storage: databasePool ? 'postgres' : 'file' });
+  } catch {
+    res.status(503).json({ status: 'unavailable', app: 'FORME Salon Cloud', storage: 'postgres' });
+  }
+});
 app.post('/api/payments/webhook', async (req, res, next) => {
   try {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET; if (!secret) return res.status(503).json({ error: 'Payment webhook secret is not configured.' });
