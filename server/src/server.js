@@ -254,14 +254,22 @@ function normalizePhoneNumber(value) {
   return { e164: `+${digits}`, digits };
 }
 function emailDeliveryProvider() {
+  if (process.env.GMAIL_APPS_SCRIPT_URL || process.env.GMAIL_APPS_SCRIPT_TOKEN) return 'gmail-apps-script';
   if (process.env.GMAIL_SMTP_USER || process.env.GMAIL_SMTP_APP_PASSWORD) return 'gmail';
   if (process.env.RESEND_API_KEY && process.env.OTP_EMAIL_FROM) return 'resend';
   return '';
 }
 function emailDeliveryReady() {
   const provider = emailDeliveryProvider();
+  if (provider === 'gmail-apps-script') return Boolean(process.env.GMAIL_APPS_SCRIPT_URL && String(process.env.GMAIL_APPS_SCRIPT_TOKEN || '').trim().length >= 32);
   if (provider === 'gmail') return Boolean(process.env.GMAIL_SMTP_USER && process.env.GMAIL_SMTP_APP_PASSWORD);
   return provider === 'resend';
+}
+function emailDeliveryConfigurationError() {
+  const provider = emailDeliveryProvider();
+  if (provider === 'gmail-apps-script') return 'Gmail mail bridge is incomplete. Set its deployment URL and token in Render.';
+  if (provider === 'gmail') return 'Gmail SMTP needs both GMAIL_SMTP_USER and GMAIL_SMTP_APP_PASSWORD in Render.';
+  return 'Email verification is not configured yet. Please contact the salon platform administrator.';
 }
 function emailOtpConfigurationReady() { return emailDeliveryReady(); }
 function passwordResetEmailReady() { return emailDeliveryReady(); }
@@ -273,6 +281,24 @@ function otpMatches(challengeId, channel, value, expectedHex) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 async function sendEmail({ email, subject, html }) {
+  if (emailDeliveryProvider() === 'gmail-apps-script') {
+    let endpoint;
+    try { endpoint = new URL(process.env.GMAIL_APPS_SCRIPT_URL || ''); } catch { throw Object.assign(new Error('Gmail mail bridge URL is invalid.'), { deliveryChannel: 'email', emailProvider: 'gmail-apps-script' }); }
+    if (endpoint.protocol !== 'https:' || endpoint.hostname !== 'script.google.com' || String(process.env.GMAIL_APPS_SCRIPT_TOKEN || '').trim().length < 32) {
+      throw Object.assign(new Error('Gmail mail bridge configuration is incomplete.'), { deliveryChannel: 'email', emailProvider: 'gmail-apps-script' });
+    }
+    let response;
+    try {
+      response = await fetch(endpoint, { method: 'POST', signal: AbortSignal.timeout(20000), headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: process.env.GMAIL_APPS_SCRIPT_TOKEN, to: email, subject, html }) });
+    } catch {
+      throw Object.assign(new Error('Gmail mail bridge is unavailable.'), { deliveryChannel: 'email', emailProvider: 'gmail-apps-script' });
+    }
+    if (!response.ok) throw Object.assign(new Error('Gmail mail bridge rejected the email.'), { deliveryChannel: 'email', emailProvider: 'gmail-apps-script', providerStatus: response.status });
+    let result;
+    try { result = await response.json(); } catch { result = null; }
+    if (!result?.ok) throw Object.assign(new Error('Gmail mail bridge did not accept the email.'), { deliveryChannel: 'email', emailProvider: 'gmail-apps-script', providerCode: result?.error || 'invalid-response' });
+    return;
+  }
   if (emailDeliveryProvider() === 'gmail') {
     const username = String(process.env.GMAIL_SMTP_USER || '').trim();
     const appPassword = String(process.env.GMAIL_SMTP_APP_PASSWORD || '').replace(/\s/g, '');
@@ -302,13 +328,15 @@ async function sendPasswordResetEmail(email, code) {
   await sendEmail({ email, subject: 'Reset your FORME password', html: `<div style="font-family:Arial,sans-serif;color:#17211c"><h2>Reset your FORME password</h2><p>Your password reset code is:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>This code expires in 10 minutes. If you did not request a password reset, you can ignore this email.</p></div>` });
 }
 function registrationDeliveryError(error) {
+  if (error.emailProvider === 'gmail-apps-script') return 'Gmail mail bridge could not send the OTP. Check its deployment URL, token, and Google Apps Script mail quota.';
+  if (error.emailProvider === 'gmail' && ['ETIMEDOUT', 'EHOSTUNREACH'].includes(error.providerCode)) return 'Gmail SMTP timed out. Render Free blocks SMTP ports; configure the Gmail Apps Script mail bridge to send OTPs over HTTPS.';
   if (error.emailProvider === 'gmail') return 'Gmail could not send the OTP. Check the Gmail address and App Password in Render; do not use your normal Gmail password.';
   if (error.deliveryChannel === 'email' && error.providerStatus === 403) return 'Email OTP was blocked by Resend. For testing, use the email address on the Resend account, or verify a sender domain and set OTP_EMAIL_FROM to an address on that domain.';
   if (error.deliveryChannel === 'email' && error.providerStatus === 401) return 'Email OTP could not be authorized. Check the Resend API key in Render.';
   return 'Email OTP could not be sent. Check Resend email settings and try again.';
 }
 async function startRegistrationVerification(platform, { purpose, email, phone, registration }) {
-  if (!emailOtpConfigurationReady()) return { status: 503, error: 'Email verification is not configured yet. Please contact the salon platform administrator.' };
+  if (!emailOtpConfigurationReady()) return { status: 503, error: emailDeliveryConfigurationError() };
   const now = Date.now(); platform.registrationChallenges ||= []; platform.otpSendHistory ||= [];
   platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
   const recent = platform.otpSendHistory.filter((item) => item.flow !== 'password-reset' && (item.email === email || item.phone === phone));
@@ -346,7 +374,7 @@ async function verifyRegistrationCodes(platform, { challengeId, purpose, emailCo
   return { challenge };
 }
 async function startPasswordReset(platform, { accountType, email }) {
-  if (!passwordResetEmailReady()) return { status: 503, error: 'Password recovery is temporarily unavailable. Please try again later.' };
+  if (!passwordResetEmailReady()) return { status: 503, error: emailDeliveryConfigurationError() };
   const purpose = `${accountType}-password-reset`; const now = Date.now();
   platform.passwordResetChallenges ||= []; platform.otpSendHistory ||= [];
   platform.passwordResetChallenges = platform.passwordResetChallenges.filter((item) => item.expiresAt > now);
