@@ -292,6 +292,7 @@ function registrationDeliveryError(error) {
   if (error.deliveryChannel === 'email' && error.providerStatus === 403) return 'Email OTP was blocked by Resend. For testing, use the email address on the Resend account, or verify a sender domain and set OTP_EMAIL_FROM to an address on that domain.';
   if (error.deliveryChannel === 'email' && error.providerStatus === 401) return 'Email OTP could not be authorized. Check the Resend API key in Render.';
   if (error.deliveryChannel === 'email') return 'Email OTP could not be sent. Check Resend email logs and try again.';
+  if (error.deliveryChannel === 'sms' && error.providerStatus === 400) return 'MSG91 rejected the SMS because MSG91_OTP_TEMPLATE_ID is missing, incorrect, or archived. Set the active SMS template ID in Render.';
   if (error.deliveryChannel === 'sms' && [401, 403].includes(error.providerStatus)) return 'SMS OTP was rejected. Check the MSG91 key, approved DLT template, sender ID and template ID.';
   if (error.deliveryChannel === 'sms') return 'SMS OTP could not be sent. Check the MSG91 delivery settings and try again.';
   return 'We could not deliver both verification codes. Check the email and phone number, then try again shortly.';
