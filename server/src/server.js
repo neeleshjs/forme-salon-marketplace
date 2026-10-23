@@ -301,15 +301,24 @@ async function startRegistrationVerification(platform, { purpose, email, phone, 
   const now = Date.now(); platform.registrationChallenges ||= []; platform.otpSendHistory ||= [];
   platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
   const recent = platform.otpSendHistory.filter((item) => item.flow !== 'password-reset' && (item.email === email || item.phone === phone));
-  if (recent.some((item) => now - item.createdAt < 60 * 1000)) return { status: 429, error: 'Please wait one minute before requesting another code.' };
-  if (recent.length >= 3) return { status: 429, error: 'Too many codes were requested. Please try again in an hour.' };
+  const latestAttemptAt = recent.reduce((latest, item) => Math.max(latest, Number(item.createdAt) || 0), 0);
+  if (latestAttemptAt && now - latestAttemptAt < 60 * 1000) return { status: 429, error: 'Please wait one minute before requesting another code.' };
+  const delivered = recent.filter((item) => item.delivered === true);
+  const retryMinutes = (items) => Math.max(1, Math.ceil((Math.min(...items.map((item) => Number(item.createdAt) || now)) + 60 * 60 * 1000 - now) / 60000));
+  if (delivered.length >= 3) return { status: 429, error: `For your security, only 3 verification codes can be sent per hour. Try again in about ${retryMinutes(delivered)} minute(s).` };
+  // Legacy entries without a delivery status count as attempts, not as successfully sent codes.
+  // This lets users retry after provider failures while keeping a stricter hourly attempt cap.
+  if (recent.length >= 5) return { status: 429, error: `Too many signup attempts. Please try again in about ${retryMinutes(recent)} minute(s).` };
   const challengeId = randomUUID(); const emailCode = String(randomInt(100000, 1000000)); const phoneCode = String(randomInt(100000, 1000000));
   platform.registrationChallenges = platform.registrationChallenges.filter((item) => !(item.purpose === purpose && item.email === email) && item.expiresAt > now);
   const challengeRecord = { id: challengeId, purpose, email, phone, emailOtpHash: hashOtp(challengeId, 'email', emailCode).toString('hex'), phoneOtpHash: hashOtp(challengeId, 'phone', phoneCode).toString('hex'), registration, attempts: 0, expiresAt: now + 10 * 60 * 1000, createdAt: now };
-  platform.registrationChallenges.push(challengeRecord); platform.otpSendHistory.push({ email, phone, flow: 'signup', createdAt: now }); await writePlatform(platform);
+  const sendAttempt = { id: randomUUID(), email, phone, flow: 'signup', createdAt: now, delivered: false };
+  platform.registrationChallenges.push(challengeRecord); platform.otpSendHistory.push(sendAttempt); await writePlatform(platform);
   try {
     await sendVerificationEmail(email, emailCode);
     await sendVerificationSms(phone, phoneCode);
+    sendAttempt.delivered = true;
+    await writePlatform(platform);
   } catch (error) {
     console.warn('Signup OTP delivery failed.', { channel: error.deliveryChannel || 'unknown', providerStatus: error.providerStatus || null });
     platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.id !== challengeId);
