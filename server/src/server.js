@@ -25,29 +25,11 @@ app.use(express.json({ limit: '64kb', verify: (req, _res, buffer) => { req.rawBo
 app.use(express.static(clientDir));
 
 const initialState = (overrides = {}) => {
-  const factor = priceFactor(overrides.currency || CURRENCY);
-  const price = (inr) => Math.max(1, Math.round(inr * factor));
   return ({
-  settings: { businessName: 'FORME Barber Studio', branchName: 'Main branch', city: '', country: 'India', currency: CURRENCY, timeZone: 'Asia/Kolkata', locale: 'en-IN', openingTime: '10:00', closingTime: '20:00', openDays: [2, 3, 4, 5, 6, 0], pointsPerRupee: 0.1, redemptionValue: 0.5, ...overrides },
-  services: [
-    { id: 'classic-cut', name: 'Classic haircut', category: 'Hair', minutes: 30, price: price(299), description: 'A clean cut, finished to your style.', active: true },
-    { id: 'beard-shape', name: 'Beard trim & shape', category: 'Beard', minutes: 25, price: price(199), description: 'Precise shaping and a neat finish.', active: true },
-    { id: 'cut-beard', name: 'Haircut + beard', category: 'Combos', minutes: 50, price: price(449), description: 'A complete refresh in one visit.', active: true },
-    { id: 'hair-wash', name: 'Hair wash & style', category: 'Care', minutes: 20, price: price(149), description: 'Wash, style, and get ready to go.', active: true },
-    { id: 'premium-cut', name: 'Premium cut & finish', category: 'Hair', minutes: 45, price: price(499), description: 'Consultation, precision cut, wash, and styling.', active: true },
-  ],
-  staff: [
-    { id: 'arjun', name: 'Arjun Mehta', role: 'Senior barber', active: true, days: [2, 3, 4, 5, 6, 0], start: '10:00', end: '20:00', color: '#9cae83' },
-    { id: 'kabir', name: 'Kabir Singh', role: 'Barber', active: true, days: [2, 3, 4, 5, 6, 0], start: '10:00', end: '20:00', color: '#c9a77a' },
-    { id: 'dev', name: 'Dev Sharma', role: 'Stylist', active: true, days: [2, 3, 4, 5, 6, 0], start: '11:00', end: '19:00', color: '#9b9ac1' },
-  ],
+  settings: { businessName: '', branchName: 'Main branch', city: '', country: 'India', currency: CURRENCY, timeZone: 'Asia/Kolkata', locale: 'en-IN', openingTime: '10:00', closingTime: '20:00', openDays: [2, 3, 4, 5, 6, 0], pointsPerRupee: 0.1, redemptionValue: 0.5, ...overrides },
+  services: [], staff: [],
   appointments: [], customers: [], orders: [], purchaseOrders: [], reviews: [], paymentRecords: [],
-  products: [
-    { id: 'clay', name: 'Matte styling clay', category: 'Styling', price: price(499), stock: 12, lowStockAt: 4, sku: 'FOR-CLY-01', active: true },
-    { id: 'pomade', name: 'Classic pomade', category: 'Styling', price: price(399), stock: 8, lowStockAt: 3, sku: 'FOR-POM-01', active: true },
-    { id: 'beard-oil', name: 'Beard conditioning oil', category: 'Beard care', price: price(349), stock: 9, lowStockAt: 3, sku: 'FOR-BRD-01', active: true },
-    { id: 'shampoo', name: 'Daily care shampoo', category: 'Hair care', price: price(599), stock: 5, lowStockAt: 2, sku: 'FOR-SHP-01', active: true },
-  ], movements: [],
+  products: [], movements: [],
   });
 };
 
@@ -117,7 +99,7 @@ async function writePlatform(platform) {
 }
 async function readPlatform() {
   try {
-    const platform = JSON.parse(await fs.readFile(platformFile, 'utf8')); platform.customerUsers ||= []; platform.registrationChallenges ||= []; platform.otpSendHistory ||= [];
+    const platform = JSON.parse(await fs.readFile(platformFile, 'utf8')); platform.customerUsers ||= []; platform.registrationChallenges ||= []; platform.passwordResetChallenges ||= []; platform.otpSendHistory ||= [];
     const now = Date.now(); const challengeCount = platform.registrationChallenges.length; const historyCount = platform.otpSendHistory.length;
     platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.expiresAt > now);
     platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
@@ -126,16 +108,9 @@ async function readPlatform() {
   }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    const email = normalizeEmail(process.env.DEMO_OWNER_EMAIL || 'owner@forme.studio');
-    const password = process.env.DEMO_OWNER_PASSWORD || 'forme-demo-2026';
-    const credentials = hashPassword(password);
-    const owner = { id: randomUUID(), name: 'FORME Owner', email, passwordSalt: credentials.salt, passwordHash: credentials.hash, tenantIds: ['forme-tenant'], createdAt: new Date().toISOString() };
-    const defaultPlatform = {
-      users: [owner], customerUsers: [], registrationChallenges: [], otpSendHistory: [],
-      tenants: [{ id: 'forme-tenant', slug: 'forme', name: 'FORME Barber Studio', ownerUserId: owner.id, userIds: [owner.id], createdAt: new Date().toISOString(), active: true, branches: [{ id: 'main', name: 'Main Studio', slug: 'forme-main', city: '', country: 'India', countryCode: 'IN', currency: 'INR', timeZone: 'Asia/Kolkata', locale: 'en-IN', latitude: null, longitude: null, isDefault: true, active: true }] }],
-    };
-    await writePlatform(defaultPlatform);
-    return defaultPlatform;
+    const emptyPlatform = { users: [], customerUsers: [], tenants: [], registrationChallenges: [], passwordResetChallenges: [], otpSendHistory: [] };
+    await writePlatform(emptyPlatform);
+    return emptyPlatform;
   }
 }
 function tenantChoices(platform, user) {
