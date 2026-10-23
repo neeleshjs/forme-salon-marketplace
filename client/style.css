@@ -180,3 +180,11 @@ a,button,input,select,textarea{-webkit-tap-highlight-color:transparent}
 .market-proof,.directory-subtitle{line-height:1.6}
 @media(max-width:900px){.partner-how-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:520px){.partner-how{padding-top:2.8rem;padding-bottom:3.2rem}.partner-how-grid{grid-template-columns:1fr}.partner-how-grid article{padding:1.1rem}.form-help{font-size:.82rem}}
+
+/* Password visibility controls for sign-in, registration and recovery forms */
+.password-field{position:relative;display:flex;align-items:center;width:100%;min-width:0}
+.password-field>input{flex:1;min-width:0;padding-right:3rem!important}
+.password-visibility-toggle{position:absolute;right:.15rem;top:50%;display:grid;width:42px;height:42px;place-items:center;padding:0;transform:translateY(-50%);border:0;border-radius:8px;background:transparent;color:#64705d;cursor:pointer}
+.password-visibility-toggle:hover{background:#edf1e8;color:var(--green)}
+.password-visibility-toggle:focus-visible{outline:3px solid #9bb96d;outline-offset:1px}
+.password-visibility-toggle svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
