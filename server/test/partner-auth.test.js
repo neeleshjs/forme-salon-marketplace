@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 const serverDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sessionSecret = 'test-only-session-secret-keep-out-of-production';
 const signupCode = '654321';
+const customerSignupCode = '987654';
 let tempDir;
 let baseUrl;
 let serverProcess;
@@ -51,38 +52,63 @@ before(async () => {
   const ownerPassword = 'LocalTestPassword123!';
   const ownerHash = scryptSync(ownerPassword, ownerSalt, 64).toString('hex');
   const owner = { id: 'owner-1', name: 'Test Owner', email: 'owner@example.com', phone: '+919876543210', passwordSalt: ownerSalt, passwordHash: ownerHash, tenantIds: ['salon-1'] };
+  const customerSalt = 'test-customer-salt';
+  const customerPassword = 'LocalCustomerPassword123!';
+  const customerHash = scryptSync(customerPassword, customerSalt, 64).toString('hex');
+  const customer = { id: 'customer-1', name: 'Test Customer', email: 'customer@example.com', phone: '+919123456780', passwordSalt: customerSalt, passwordHash: customerHash, active: true };
   const otherBranch = { id: 'branch-2', name: 'Other location', slug: 'other-location', city: 'Pune', country: 'India', countryCode: 'IN', currency: 'INR', timeZone: 'Asia/Kolkata', active: true };
   const otherTenant = { id: 'salon-2', slug: 'other-salon', name: 'Other Salon', ownerUserId: 'other-owner', userIds: ['other-owner'], active: true, branches: [otherBranch] };
   const challengeId = 'signup-challenge-test';
   const emailOtpHash = createHmac('sha256', sessionSecret).update(`${challengeId}:email:${signupCode}`).digest('hex');
+  const customerChallengeId = 'customer-signup-challenge-test';
+  const customerEmailOtpHash = createHmac('sha256', sessionSecret).update(`${customerChallengeId}:email:${customerSignupCode}`).digest('hex');
   const platform = {
     users: [owner],
-    customerUsers: [],
+    customerUsers: [customer],
     tenants: [
       { id: 'salon-1', slug: 'test-salon', name: 'Test Salon', ownerUserId: owner.id, userIds: [owner.id], active: true, branches: [{ id: 'branch-1', name: 'Main branch', slug: 'main-branch', city: 'Delhi', country: 'India', countryCode: 'IN', currency: 'INR', timeZone: 'Asia/Kolkata', active: true }] },
       otherTenant,
     ],
-    registrationChallenges: [{
-      id: challengeId,
-      purpose: 'partner',
-      email: 'new-owner@example.com',
-      phone: '+919123456789',
-      emailOtpHash,
-      registration: {
-        name: 'New Owner',
+    registrationChallenges: [
+      {
+        id: challengeId,
+        purpose: 'partner',
         email: 'new-owner@example.com',
         phone: '+919123456789',
-        passwordSalt: 'signup-test-salt',
-        passwordHash: scryptSync('SignupTestPassword123!', 'signup-test-salt', 64).toString('hex'),
-        tenantDetails: {
-          businessName: 'Test Nail Studio', branchName: 'Main branch', city: 'Delhi', country: 'India', countryCode: 'IN',
-          currency: 'INR', timeZone: 'Asia/Kolkata', categoryId: 'nail-lash-studio', subcategoryId: 'nail-lash-studio:nail-studio',
+        emailOtpHash,
+        registration: {
+          name: 'New Owner',
+          email: 'new-owner@example.com',
+          phone: '+919123456789',
+          passwordSalt: 'signup-test-salt',
+          passwordHash: scryptSync('SignupTestPassword123!', 'signup-test-salt', 64).toString('hex'),
+          tenantDetails: {
+            businessName: 'Test Nail Studio', branchName: 'Main branch', city: 'Delhi', country: 'India', countryCode: 'IN',
+            currency: 'INR', timeZone: 'Asia/Kolkata', categoryId: 'nail-lash-studio', subcategoryId: 'nail-lash-studio:nail-studio',
+          },
         },
+        attempts: 0,
+        expiresAt: Date.now() + 600000,
+        createdAt: Date.now(),
       },
-      attempts: 0,
-      expiresAt: Date.now() + 600000,
-      createdAt: Date.now(),
-    }],
+      {
+        id: customerChallengeId,
+        purpose: 'customer',
+        email: 'new-customer@example.com',
+        phone: '+919123456781',
+        emailOtpHash: customerEmailOtpHash,
+        registration: {
+          name: 'New Customer',
+          email: 'new-customer@example.com',
+          phone: '+919123456781',
+          passwordSalt: 'customer-signup-test-salt',
+          passwordHash: scryptSync('CustomerSignupTest123!', 'customer-signup-test-salt', 64).toString('hex'),
+        },
+        attempts: 0,
+        expiresAt: Date.now() + 600000,
+        createdAt: Date.now(),
+      },
+    ],
     passwordResetChallenges: [],
     otpSendHistory: [],
   };
@@ -129,6 +155,17 @@ test('partner login accepts the correct password and rejects incorrect credentia
   assert.equal(rejected.status, 401);
 });
 
+test('customer login accepts the correct password and rejects incorrect credentials', async () => {
+  const accepted = await postJson('/api/customer/login', { email: ' CUSTOMER@example.com ', password: 'LocalCustomerPassword123!' });
+  assert.equal(accepted.status, 200);
+  const session = await accepted.json();
+  assert.equal(session.customer.email, 'customer@example.com');
+  assert.ok(session.customerToken);
+
+  const rejected = await postJson('/api/customer/login', { email: 'customer@example.com', password: 'incorrect-password' });
+  assert.equal(rejected.status, 401);
+});
+
 test('partner login cannot select another owner’s salon', async () => {
   const login = await postJson('/api/auth/login', { email: 'owner@example.com', password: 'LocalTestPassword123!' });
   const { loginToken } = await login.json();
@@ -167,4 +204,18 @@ test('email OTP verification creates a partner account with its selected busines
   const created = persisted.tenants.find((tenant) => tenant.id === result.workspace.tenantId);
   assert.equal(created.categoryId, 'nail-lash-studio');
   assert.equal(created.subcategoryId, 'nail-lash-studio:nail-studio');
+});
+
+test('email OTP verification creates a customer account', async () => {
+  const wrongCode = await postJson('/api/customer/verify-registration', { challengeId: 'customer-signup-challenge-test', emailCode: '000000' });
+  assert.equal(wrongCode.status, 400);
+
+  const verified = await postJson('/api/customer/verify-registration', { challengeId: 'customer-signup-challenge-test', emailCode: customerSignupCode });
+  assert.equal(verified.status, 201);
+  const result = await verified.json();
+  assert.equal(result.customer.email, 'new-customer@example.com');
+  assert.ok(result.customerToken);
+
+  const login = await postJson('/api/customer/login', { email: result.customer.email, password: 'CustomerSignupTest123!' });
+  assert.equal(login.status, 200);
 });

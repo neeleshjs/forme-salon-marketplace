@@ -324,8 +324,8 @@ function normalizePhoneNumber(value) {
 }
 function emailDeliveryProvider() {
   if (process.env.GMAIL_APPS_SCRIPT_URL || process.env.GMAIL_APPS_SCRIPT_TOKEN) return 'gmail-apps-script';
-  if (process.env.GMAIL_SMTP_USER || process.env.GMAIL_SMTP_APP_PASSWORD) return 'gmail';
   if (process.env.RESEND_API_KEY && process.env.OTP_EMAIL_FROM) return 'resend';
+  if (process.env.GMAIL_SMTP_USER || process.env.GMAIL_SMTP_APP_PASSWORD) return 'gmail';
   return '';
 }
 function emailDeliveryReady() {
