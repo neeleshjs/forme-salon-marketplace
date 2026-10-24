@@ -27,6 +27,8 @@ The web app uses direct, reloadable routes for each main customer and salon work
 5. Open `http://localhost:5050`.
 6. Choose **Owner login**. Demo access: `owner@forme.studio` / `forme-demo-2026`.
 
+Run the automated partner authentication and category checks from `server/` with `npm test`.
+
 ## Host a public demo
 
 This repository includes a Render Blueprint for a free Node web service. Once the repository is on GitHub, connect it in Render and create the service from `render.yaml`. The service serves the customer website and API from the same URL. Render generates a session secret and demo owner password for the hosted instance; inspect the service environment in Render if you need owner dashboard access.
@@ -37,7 +39,7 @@ The first start creates the demo owner and FORME location in `server/data/platfo
 
 ## Salon partner workflow
 
-- Register an owner account with its first salon brand and location.
+- Register an owner account with a configurable business category and subcategory, then add its first business location. Categories are seeded into the database from `server/config/business-categories.json` and the signup form loads them from the public categories API.
 - Add more locations in **Studio settings**, with each location's country, city, currency, and IANA time zone.
 - Use the salon and branch selectors in the workspace header to switch context. Each location has isolated operational data.
 - Review upcoming visits and low-stock counts across the brand in the salon portfolio. Revenue stays grouped in each branch's local currency.

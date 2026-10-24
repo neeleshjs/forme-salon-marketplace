@@ -1,0 +1,123 @@
+[
+  {
+    "id": "hair-salon",
+    "slug": "hair-salon",
+    "name": "Hair salon and unisex salon",
+    "description": "Haircuts, styling, colour and hair care.",
+    "sortOrder": 10,
+    "subcategories": [
+      { "id": "hair-salon:hair-salon", "slug": "hair-salon", "name": "Hair salon", "sortOrder": 10 },
+      { "id": "hair-salon:unisex-salon", "slug": "unisex-salon", "name": "Unisex salon", "sortOrder": 20 }
+    ]
+  },
+  {
+    "id": "beauty-parlour",
+    "slug": "beauty-parlour",
+    "name": "Beauty parlour",
+    "description": "Beauty, facial and personal-care services.",
+    "sortOrder": 20,
+    "subcategories": [
+      { "id": "beauty-parlour:beauty-parlour", "slug": "beauty-parlour", "name": "Beauty parlour", "sortOrder": 10 },
+      { "id": "beauty-parlour:facials", "slug": "facials", "name": "Facials and beauty care", "sortOrder": 20 }
+    ]
+  },
+  {
+    "id": "barbershop",
+    "slug": "barbershop",
+    "name": "Barbershop and men's grooming",
+    "description": "Barbering, beard care and men's grooming.",
+    "sortOrder": 30,
+    "subcategories": [
+      { "id": "barbershop:barbershop", "slug": "barbershop", "name": "Barbershop", "sortOrder": 10 },
+      { "id": "barbershop:mens-grooming", "slug": "mens-grooming", "name": "Men's grooming", "sortOrder": 20 }
+    ]
+  },
+  {
+    "id": "spa-wellness",
+    "slug": "spa-wellness",
+    "name": "Spa and wellness studio",
+    "description": "Spa treatments and appointment-based wellness services.",
+    "sortOrder": 40,
+    "subcategories": [
+      { "id": "spa-wellness:spa", "slug": "spa", "name": "Spa", "sortOrder": 10 },
+      { "id": "spa-wellness:wellness-studio", "slug": "wellness-studio", "name": "Wellness studio", "sortOrder": 20 }
+    ]
+  },
+  {
+    "id": "nail-lash-studio",
+    "slug": "nail-lash-studio",
+    "name": "Nail, lash and brow studio",
+    "description": "Nail, lash and brow appointments.",
+    "sortOrder": 50,
+    "subcategories": [
+      { "id": "nail-lash-studio:nail-studio", "slug": "nail-studio", "name": "Nail studio", "sortOrder": 10 },
+      { "id": "nail-lash-studio:lash-studio", "slug": "lash-studio", "name": "Lash studio", "sortOrder": 20 },
+      { "id": "nail-lash-studio:brow-studio", "slug": "brow-studio", "name": "Brow studio", "sortOrder": 30 }
+    ]
+  },
+  {
+    "id": "makeup-bridal",
+    "slug": "makeup-bridal",
+    "name": "Makeup and bridal artist",
+    "description": "Makeup, bridal and event styling appointments.",
+    "sortOrder": 60,
+    "subcategories": [
+      { "id": "makeup-bridal:makeup-artist", "slug": "makeup-artist", "name": "Makeup artist", "sortOrder": 10 },
+      { "id": "makeup-bridal:bridal-artist", "slug": "bridal-artist", "name": "Bridal artist", "sortOrder": 20 }
+    ]
+  },
+  {
+    "id": "skincare-aesthetics",
+    "slug": "skincare-aesthetics",
+    "name": "Skincare and eligible aesthetics",
+    "description": "Skincare and approved non-clinical aesthetic services.",
+    "sortOrder": 70,
+    "subcategories": [
+      { "id": "skincare-aesthetics:skincare-studio", "slug": "skincare-studio", "name": "Skincare studio", "sortOrder": 10 },
+      { "id": "skincare-aesthetics:eligible-aesthetics", "slug": "eligible-aesthetics", "name": "Eligible aesthetic services", "sortOrder": 20 }
+    ]
+  },
+  {
+    "id": "qualified-clinic",
+    "slug": "qualified-clinic",
+    "name": "Qualified hair or skin clinic",
+    "description": "Clinic services subject to qualification and platform verification.",
+    "sortOrder": 80,
+    "subcategories": [
+      { "id": "qualified-clinic:hair-clinic", "slug": "hair-clinic", "name": "Hair clinic", "sortOrder": 10 },
+      { "id": "qualified-clinic:skin-clinic", "slug": "skin-clinic", "name": "Skin clinic", "sortOrder": 20 }
+    ]
+  },
+  {
+    "id": "mehendi-artist",
+    "slug": "mehendi-artist",
+    "name": "Mehendi artist",
+    "description": "Bridal and event mehendi appointments.",
+    "sortOrder": 90,
+    "subcategories": [
+      { "id": "mehendi-artist:bridal-mehendi", "slug": "bridal-mehendi", "name": "Bridal mehendi", "sortOrder": 10 },
+      { "id": "mehendi-artist:event-mehendi", "slug": "event-mehendi", "name": "Event mehendi", "sortOrder": 20 }
+    ]
+  },
+  {
+    "id": "home-service-beauty",
+    "slug": "home-service-beauty",
+    "name": "Home-service beauty professional",
+    "description": "Beauty and grooming appointments delivered at the customer's location.",
+    "sortOrder": 100,
+    "subcategories": [
+      { "id": "home-service-beauty:home-stylist", "slug": "home-stylist", "name": "Home hair stylist", "sortOrder": 10 },
+      { "id": "home-service-beauty:home-beauty", "slug": "home-beauty", "name": "Home beauty professional", "sortOrder": 20 }
+    ]
+  },
+  {
+    "id": "other-appointments",
+    "slug": "other-appointments",
+    "name": "Other approved appointment business",
+    "description": "Other appointment-based local services reviewed by FORME.",
+    "sortOrder": 110,
+    "subcategories": [
+      { "id": "other-appointments:other", "slug": "other", "name": "Other appointment service", "sortOrder": 10 }
+    ]
+  }
+]

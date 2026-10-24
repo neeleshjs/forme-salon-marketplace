@@ -15,6 +15,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const dataFile = path.resolve(process.env.DATA_FILE || path.join(here, '../data/studio.json'));
 const platformFile = path.resolve(process.env.PLATFORM_FILE || path.join(here, '../data/platform.json'));
 const dataRoot = path.dirname(dataFile);
+const migrationDir = path.resolve(here, '../migrations');
+const businessCategoriesFile = path.resolve(here, '../config/business-categories.json');
 const { Pool } = pg;
 const databasePool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, max: 5, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30000, allowExitOnIdle: true }) : null;
 let databaseSetup;
@@ -45,14 +47,80 @@ function stateDocumentKey(scope) {
 
 async function ensureDatabase() {
   if (!databasePool) return;
-  databaseSetup ||= databasePool.query(`
-    CREATE TABLE IF NOT EXISTS forme_documents (
-      document_key TEXT PRIMARY KEY,
-      payload JSONB NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `).catch((error) => { databaseSetup = null; throw error; });
+  databaseSetup ||= (async () => {
+    await databasePool.query(`
+      CREATE TABLE IF NOT EXISTS forme_documents (
+        document_key TEXT PRIMARY KEY,
+        payload JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await databasePool.query(`
+      CREATE TABLE IF NOT EXISTS forme_schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    const migrationFiles = (await fs.readdir(migrationDir)).filter((file) => /^\d+_[a-z0-9_-]+\.sql$/i.test(file)).sort();
+    for (const file of migrationFiles) {
+      const version = Number(file.match(/^(\d+)_/)[1]);
+      const client = await databasePool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock($1)', [784215903]);
+        const applied = await client.query('SELECT 1 FROM forme_schema_migrations WHERE version = $1', [version]);
+        if (!applied.rowCount) {
+          await client.query(await fs.readFile(path.join(migrationDir, file), 'utf8'));
+          await client.query('INSERT INTO forme_schema_migrations (version, name) VALUES ($1, $2)', [version, file]);
+        }
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+    const categories = JSON.parse(await fs.readFile(businessCategoriesFile, 'utf8'));
+    for (const category of categories) {
+      await databasePool.query(`
+        INSERT INTO marketplace_categories (id, slug, name, description, sort_order)
+        VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING
+      `, [category.id, category.slug, category.name, category.description || '', category.sortOrder || 0]);
+      for (const subcategory of category.subcategories || []) {
+        await databasePool.query(`
+          INSERT INTO marketplace_subcategories (id, category_id, slug, name, sort_order)
+          VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING
+        `, [subcategory.id, category.id, subcategory.slug, subcategory.name, subcategory.sortOrder || 0]);
+      }
+    }
+  })().catch((error) => { databaseSetup = null; throw error; });
   await databaseSetup;
+}
+
+async function getMarketplaceCategories() {
+  if (!databasePool) return JSON.parse(await fs.readFile(businessCategoriesFile, 'utf8'));
+  await ensureDatabase();
+  const { rows: categories } = await databasePool.query('SELECT id, slug, name, description, sort_order AS "sortOrder" FROM marketplace_categories WHERE active = TRUE ORDER BY sort_order, name');
+  const { rows: subcategories } = await databasePool.query('SELECT id, category_id AS "categoryId", slug, name, sort_order AS "sortOrder" FROM marketplace_subcategories WHERE active = TRUE ORDER BY sort_order, name');
+  const subcategoriesByCategory = new Map();
+  for (const subcategory of subcategories) {
+    const items = subcategoriesByCategory.get(subcategory.categoryId) || [];
+    items.push({ id: subcategory.id, slug: subcategory.slug, name: subcategory.name, sortOrder: subcategory.sortOrder });
+    subcategoriesByCategory.set(subcategory.categoryId, items);
+  }
+  return categories.map((category) => ({ ...category, subcategories: subcategoriesByCategory.get(category.id) || [] }));
+}
+
+async function resolveBusinessCategory(categoryId = 'hair-salon', subcategoryId = '') {
+  const categories = await getMarketplaceCategories();
+  const category = categories.find((item) => item.id === String(categoryId || ''));
+  if (!category) throw new Error('Choose an active business category.');
+  const subcategory = subcategoryId ? category.subcategories.find((item) => item.id === String(subcategoryId)) : null;
+  if (subcategoryId && !subcategory) throw new Error('Choose a subcategory from the selected category.');
+  if (category.subcategories.length && !subcategory) throw new Error('Choose a subcategory for this business category.');
+  return { categoryId: category.id, categorySlug: category.slug, categoryName: category.name, subcategoryId: subcategory?.id || null, subcategorySlug: subcategory?.slug || null, subcategoryName: subcategory?.name || null };
 }
 
 async function readDocument(key) {
@@ -175,7 +243,7 @@ async function readPlatform() {
   }
 }
 function tenantChoices(platform, user) {
-  return platform.tenants.filter((tenant) => tenant.active && user.tenantIds.includes(tenant.id)).map((tenant) => ({ id: tenant.id, slug: tenant.slug, name: tenant.name, branches: tenant.branches.filter((branch) => branch.active).map(({ id, name, slug, city, country, currency, timeZone }) => ({ id, name, slug, city, country, currency, timeZone })) }));
+  return platform.tenants.filter((tenant) => tenant.active && user.tenantIds.includes(tenant.id)).map((tenant) => ({ id: tenant.id, slug: tenant.slug, name: tenant.name, categoryId: tenant.categoryId || 'hair-salon', categoryName: tenant.categoryName || 'Hair salon and unisex salon', subcategoryId: tenant.subcategoryId || null, subcategoryName: tenant.subcategoryName || null, branches: tenant.branches.filter((branch) => branch.active).map(({ id, name, slug, city, country, currency, timeZone }) => ({ id, name, slug, city, country, currency, timeZone })) }));
 }
 function makeSession(user, tenant, branch) {
   return signToken({ type: 'session', userId: user.id, authVersion: accountAuthVersion(user), email: user.email, tenantId: tenant.id, branchId: branch.id, role: tenant.ownerUserId === user.id ? 'owner' : 'manager', exp: Date.now() + 12 * 60 * 60 * 1000 });
@@ -211,9 +279,10 @@ async function createTenantForUser(platform, user, details) {
   if (businessName.length < 2 || branchName.length < 2 || !country || !/^[A-Z]{3}$/.test(currency)) throw new Error('Enter a business name, location, country, and three-letter currency.');
   try { new Intl.DateTimeFormat('en', { timeZone }).format(); } catch { throw new Error('Choose a valid time zone.'); }
   try { new Intl.NumberFormat('en', { style: 'currency', currency }).format(1); } catch { throw new Error('Choose a supported currency.'); }
+  const category = await resolveBusinessCategory(details.categoryId || 'hair-salon', details.subcategoryId || '');
   const baseSlug = slugify(businessName);
   const slug = platform.tenants.some((t) => t.slug === baseSlug) ? `${baseSlug}-${randomBytes(2).toString('hex')}` : baseSlug;
-  const tenant = { id: randomUUID(), slug, name: businessName, ownerUserId: user.id, userIds: [user.id], createdAt: new Date().toISOString(), active: true, branches: [] };
+  const tenant = { id: randomUUID(), slug, name: businessName, ...category, ownerUserId: user.id, userIds: [user.id], createdAt: new Date().toISOString(), active: true, branches: [] };
   const coordinates = parseCoordinates(details);
   const branch = { id: randomUUID(), name: branchName, slug: slugify(`${branchName}-${city || country}`), city, country, countryCode, currency, timeZone, locale: String(details.locale || 'en'), ...coordinates, isDefault: false, active: true };
   tenant.branches.push(branch);
@@ -479,12 +548,15 @@ app.post('/api/payments/webhook', async (req, res, next) => {
     res.status(404).json({ error: 'No booking matches this payment order.' });
   } catch (e) { next(e); }
 });
+app.get('/api/public/categories', async (_req, res, next) => {
+  try { res.json(await getMarketplaceCategories()); } catch (e) { next(e); }
+});
 app.get('/api/public/salons', async (req, res, next) => {
   try {
     const platform = await readPlatform(); const q = String(req.query.q || '').toLowerCase(); const city = String(req.query.city || '').toLowerCase(); const country = String(req.query.country || '').toLowerCase();
     const userLatitude = Number(req.query.lat); const userLongitude = Number(req.query.lng); const hasLocation = Number.isFinite(userLatitude) && userLatitude >= -90 && userLatitude <= 90 && Number.isFinite(userLongitude) && userLongitude >= -180 && userLongitude <= 180;
     const locations = platform.tenants.filter((t) => t.active && (!q || `${t.name} ${t.branches.map((b) => `${b.city} ${b.country}`).join(' ')}`.toLowerCase().includes(q))).flatMap((t) => t.branches.filter((b) => b.active && (!city || b.city.toLowerCase().includes(city)) && (!country || b.country.toLowerCase() === country)).map((b) => ({ tenant: t, branch: b })));
-    const salons = await Promise.all(locations.map(async ({ tenant, branch }) => { const state = await readStateFor({ tenant, branch }); const reviews = state.reviews || []; const ratingCount = reviews.length; return { name: tenant.name, slug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone, latitude: branch.latitude ?? null, longitude: branch.longitude ?? null, averageRating: ratingCount ? Math.round(reviews.reduce((sum, review) => sum + review.rating, 0) / ratingCount * 10) / 10 : null, ratingCount, distanceKm: hasLocation && Number.isFinite(branch.latitude) && Number.isFinite(branch.longitude) ? Math.round(distanceKm(userLatitude, userLongitude, branch.latitude, branch.longitude) * 10) / 10 : null }; }));
+    const salons = await Promise.all(locations.map(async ({ tenant, branch }) => { const state = await readStateFor({ tenant, branch }); const reviews = state.reviews || []; const ratingCount = reviews.length; return { name: tenant.name, slug: tenant.slug, categoryId: tenant.categoryId || 'hair-salon', categoryName: tenant.categoryName || 'Hair salon and unisex salon', subcategoryId: tenant.subcategoryId || null, subcategoryName: tenant.subcategoryName || null, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone, latitude: branch.latitude ?? null, longitude: branch.longitude ?? null, averageRating: ratingCount ? Math.round(reviews.reduce((sum, review) => sum + review.rating, 0) / ratingCount * 10) / 10 : null, ratingCount, distanceKm: hasLocation && Number.isFinite(branch.latitude) && Number.isFinite(branch.longitude) ? Math.round(distanceKm(userLatitude, userLongitude, branch.latitude, branch.longitude) * 10) / 10 : null }; }));
     if (hasLocation) salons.sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
     res.json(salons);
   } catch (e) { next(e); }
@@ -549,13 +621,14 @@ app.post('/api/auth/register', async (req, res, next) => {
     if (typeof name !== 'string' || name.trim().length < 2 || !/^\S+@\S+\.\S+$/.test(normalized) || !validPhone(String(phone || '')) || typeof password !== 'string' || password.length < 8) return res.status(400).json({ error: 'Enter your name, a valid email, phone number, and a password with at least 8 characters.' });
     const details = req.body || {}; const businessName = String(details.businessName || '').trim(); const branchName = String(details.branchName || 'Main branch').trim(); const country = String(details.country || '').trim(); const currency = String(details.currency || 'USD').trim().toUpperCase(); const timeZone = String(details.timeZone || 'Etc/UTC').trim();
     if (businessName.length < 2 || branchName.length < 2 || !country || !/^[A-Z]{3}$/.test(currency)) return res.status(400).json({ error: 'Enter a business name, location, country, and three-letter currency.' });
+    let category; try { category = await resolveBusinessCategory(details.categoryId || 'hair-salon', details.subcategoryId || ''); } catch (error) { return res.status(400).json({ error: error.message }); }
     try { new Intl.DateTimeFormat('en', { timeZone }).format(); new Intl.NumberFormat('en', { style: 'currency', currency }).format(1); parseCoordinates(details); }
     catch { return res.status(400).json({ error: 'Enter a valid country, currency, time zone, and map pin.' }); }
     let contactPhone; try { contactPhone = normalizePhoneNumber(phone).e164; } catch (error) { return res.status(400).json({ error: error.message }); }
     const platform = await readPlatform(); const existing = platform.users.find((user) => user.email === normalized);
     if (existing && !passwordMatches(password, existing)) return res.status(409).json({ error: 'This email already has an account. Sign in with its password to add another salon.' });
     const credentials = existing ? { salt: existing.passwordSalt, hash: existing.passwordHash } : hashPassword(password);
-    const registration = { name: existing?.name || name.trim().slice(0, 80), email: normalized, phone: contactPhone, passwordSalt: credentials.salt, passwordHash: credentials.hash, existingUserId: existing?.id || null, tenantDetails: { businessName, branchName, city: details.city, country, countryCode: details.countryCode, currency, timeZone, locale: details.locale, latitude: details.latitude, longitude: details.longitude } };
+    const registration = { name: existing?.name || name.trim().slice(0, 80), email: normalized, phone: contactPhone, passwordSalt: credentials.salt, passwordHash: credentials.hash, existingUserId: existing?.id || null, tenantDetails: { businessName, branchName, city: details.city, country, countryCode: details.countryCode, currency, timeZone, locale: details.locale, latitude: details.latitude, longitude: details.longitude, categoryId: category.categoryId, subcategoryId: category.subcategoryId } };
     const result = await startRegistrationVerification(platform, { purpose: 'partner', email: normalized, phone: contactPhone, registration });
     if (result.error) return res.status(result.status).json({ error: result.error });
     const { status, ...challenge } = result; res.status(202).json(challenge);
@@ -658,7 +731,7 @@ app.use('/api', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 app.get('/api/salon/profile', async (_req, res, next) => {
-  try { const scope = scopeStorage.getStore(); const state = await readState(); res.json({ tenantName: scope.tenant.name, tenantSlug: scope.tenant.slug, branch: scope.branch, settings: state.settings }); } catch (e) { next(e); }
+  try { const scope = scopeStorage.getStore(); const state = await readState(); res.json({ tenantName: scope.tenant.name, tenantSlug: scope.tenant.slug, categoryId: scope.tenant.categoryId || 'hair-salon', categoryName: scope.tenant.categoryName || 'Hair salon and unisex salon', subcategoryId: scope.tenant.subcategoryId || null, subcategoryName: scope.tenant.subcategoryName || null, branch: scope.branch, settings: state.settings }); } catch (e) { next(e); }
 });
 app.get('/api/reviews', async (_req, res, next) => {
   try { const reviews = (await readState()).reviews || []; const averageRating = reviews.length ? Math.round(reviews.reduce((sum, item) => sum + item.rating, 0) / reviews.length * 10) / 10 : null; res.json({ averageRating, ratingCount: reviews.length, reviews: reviews.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 30).map(({ rating, comment, customerName, createdAt }) => ({ rating, comment, customerName, createdAt })) }); } catch (e) { next(e); }

@@ -19,6 +19,8 @@ let services = [];
 let staff = [];
 let availability = [];
 let adminData = { products: [], customers: [], staff: [], services: [] };
+let partnerCategories = [];
+let partnerCategoryLoadPromise = null;
 let cart = [];
 let posType = 'all';
 let appointmentCache = [];
@@ -298,7 +300,68 @@ $('#manageDate').addEventListener('change', async () => {
   } catch (error) { $('#manageTime').innerHTML = `<option value="">${escapeHtml(error.message)}</option>`; }
 });
 
-function openAdmin(create = false) { $('#adminShell').hidden = false; document.body.style.overflow = 'hidden'; addingOrganization = Boolean(create && sessionStorage.getItem(tokenKey)); setAuthMode(create ? 'register' : 'login'); if (sessionStorage.getItem(tokenKey) && !addingOrganization) resumeSession(); }
+function ensurePartnerCategoryFields() {
+  if ($('#partnerBusinessCategory')) return;
+  const fields = $('#authCreateFields');
+  const businessName = $('#adminLogin [name="businessName"]')?.closest('label');
+  if (!fields || !businessName) return;
+  const categoryLabel = document.createElement('label');
+  categoryLabel.textContent = 'Business category';
+  const categorySelect = document.createElement('select');
+  categorySelect.id = 'partnerBusinessCategory';
+  categorySelect.name = 'categoryId';
+  categorySelect.required = true;
+  categorySelect.setAttribute('aria-label', 'Business category');
+  categoryLabel.append(categorySelect);
+  const categoryHelp = document.createElement('small');
+  categoryHelp.className = 'field-help';
+  categoryHelp.textContent = 'Choose the closest match. Some categories may need additional verification.';
+  categoryLabel.append(categoryHelp);
+
+  const subcategoryLabel = document.createElement('label');
+  subcategoryLabel.textContent = 'Business type';
+  const subcategorySelect = document.createElement('select');
+  subcategorySelect.id = 'partnerBusinessSubcategory';
+  subcategorySelect.name = 'subcategoryId';
+  subcategorySelect.required = true;
+  subcategorySelect.setAttribute('aria-label', 'Business type');
+  subcategoryLabel.append(subcategorySelect);
+  fields.insertBefore(categoryLabel, businessName);
+  fields.insertBefore(subcategoryLabel, businessName);
+  categorySelect.addEventListener('change', renderPartnerSubcategories);
+}
+
+function renderPartnerSubcategories() {
+  const categorySelect = $('#partnerBusinessCategory');
+  const subcategorySelect = $('#partnerBusinessSubcategory');
+  if (!categorySelect || !subcategorySelect) return;
+  const selectedCategory = partnerCategories.find((category) => category.id === categorySelect.value);
+  const subcategories = selectedCategory?.subcategories || [];
+  subcategorySelect.replaceChildren(new Option(subcategories.length ? 'Choose a business type' : 'No separate type available', ''));
+  for (const subcategory of subcategories) subcategorySelect.add(new Option(subcategory.name, subcategory.id));
+  subcategorySelect.disabled = !subcategories.length;
+  subcategorySelect.required = subcategories.length > 0 && authMode === 'register';
+}
+
+async function loadPartnerCategories() {
+  ensurePartnerCategoryFields();
+  if (partnerCategoryLoadPromise) return partnerCategoryLoadPromise;
+  partnerCategoryLoadPromise = (async () => {
+    const categories = await api('/api/public/categories');
+    if (!Array.isArray(categories)) throw new Error('Business categories could not be loaded. Refresh the page and try again.');
+    partnerCategories = categories;
+    const categorySelect = $('#partnerBusinessCategory');
+    if (!categorySelect) return;
+    const selected = categorySelect.value;
+    categorySelect.replaceChildren(new Option('Choose a business category', ''));
+    for (const category of partnerCategories) categorySelect.add(new Option(category.name, category.id));
+    categorySelect.value = partnerCategories.some((category) => category.id === selected) ? selected : '';
+    renderPartnerSubcategories();
+  })().catch((error) => { partnerCategoryLoadPromise = null; throw error; });
+  return partnerCategoryLoadPromise;
+}
+
+function openAdmin(create = false) { $('#adminShell').hidden = false; document.body.style.overflow = 'hidden'; addingOrganization = Boolean(create && sessionStorage.getItem(tokenKey)); ensurePartnerCategoryFields(); setAuthMode(create ? 'register' : 'login'); const categorySelect = $('#partnerBusinessCategory'); if (categorySelect) categorySelect.required = authMode === 'register'; renderPartnerSubcategories(); if (create) loadPartnerCategories().catch((error) => showMessage($('#adminMessage'), error.message, true)); if (sessionStorage.getItem(tokenKey) && !addingOrganization) resumeSession(); }
 function closeAdmin() { document.body.style.overflow = ''; navigate('/'); }
 function setAuthMode(mode) { authMode = mode; pendingPartnerChallengeId = ''; if(mode!=='register')sessionStorage.removeItem(partnerChallengeKey); $('#partnerPasswordResetPanel').hidden = true; $('#adminLogin').hidden = false; $('#partnerForgotPasswordButton').hidden = mode === 'register' || addingOrganization; $('#partnerVerifyPanel').hidden = true; $('#authSubmit').hidden = false; const creating = mode === 'register'; $('#authTitle').textContent = addingOrganization ? 'Add another salon.' : creating ? 'Create your salon account.' : 'Welcome back.'; $('#authIntro').textContent = addingOrganization ? 'Add another salon to your owner account.' : creating ? 'Enter an email address you can access. We will send an OTP there; your mobile number is collected for contact.' : 'Sign in to manage your salon, appointments and team.'; $('#authCreateFields').hidden = !creating; $('#ownerNameLabel').hidden = addingOrganization; $('#partnerPhoneLabel').hidden = addingOrganization; $('#adminLogin').querySelector('[name="name"]').required = creating && !addingOrganization; $('#adminLogin').querySelector('[name="phone"]').required = creating && !addingOrganization; $('#authToggle').hidden = addingOrganization; $('#adminLogin [name="email"]').required = !addingOrganization; $('#adminLogin [name="password"]').required = !addingOrganization; $('#adminLogin [name="password"]').minLength = addingOrganization ? 0 : 8; $('#adminLogin [name="email"]').closest('label').hidden = addingOrganization; $('#adminLogin [name="password"]').closest('label').hidden = addingOrganization; $('#authToggle').textContent = creating ? 'Already have a salon account? Sign in' : 'New to FORME? Create a salon account'; $('#authSubmit').textContent = addingOrganization ? 'Add another salon' : creating ? 'Create salon account' : 'Sign in'; $('#workspaceChooser').hidden = true; $('#adminLogin').querySelector('[name="country"]').required = creating; $('#adminLogin').querySelector('[name="timeZone"]').required = creating; $('#adminLogin').querySelector('[name="businessName"]').required = creating; $('#adminLogin').querySelector('[name="branchName"]').required = creating; showMessage($('#adminMessage'), ''); }
 async function resumeSession() { try { const info = await api('/api/auth/me'); activeUser=info.user; activeWorkspace=info.workspace; organizations=info.organizations; await finishWorkspace(); } catch { sessionStorage.removeItem(tokenKey); } }
