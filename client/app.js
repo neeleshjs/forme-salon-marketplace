@@ -91,7 +91,10 @@ function renderRoute() {
     document.title = 'Find salons - FORME';
     $('#salonSearch').value = params.get('q') || '';
     $('#marketLocation').value = params.get('city') || '';
-    loadSalonDirectory($('#salonSearch').value.trim());
+    $('#salonSort').value = params.get('sort') || 'recommended';
+    $('#salonMinPrice').value = params.get('minPrice') || '';
+    $('#salonMaxPrice').value = params.get('maxPrice') || '';
+    loadDirectoryCategories(params.get('categoryId') || '').then(() => loadSalonDirectory($('#salonSearch').value.trim()));
   } else if (route.name === 'partner') document.title = 'For salon owners - FORME';
   else if (route.name === 'account') { document.title = 'My bookings - FORME'; $('#customerAuthPanel h3').textContent = 'Sign in to view your bookings'; }
   else if (['salon', 'booking'].includes(route.name)) $('#customerAuthPanel h3').textContent = 'Sign in to book';
@@ -141,7 +144,7 @@ async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   if (path.startsWith('/api/admin/') || ['/api/auth/me', '/api/auth/switch-context', '/api/auth/create-organization'].includes(path)) headers['x-session-token'] = sessionStorage.getItem(tokenKey) || '';
-  else if (!path.startsWith('/api/auth/') && !path.startsWith('/api/customer/login') && !path.startsWith('/api/customer/register') && path !== '/api/customer/verify-registration' && path !== '/api/public/salons' && path !== '/api/health') { headers['x-salon-slug'] = publicContext.salon; if (publicContext.branch) headers['x-branch-id'] = publicContext.branch; if (sessionStorage.getItem('salonCustomerToken')) headers['x-customer-token'] = sessionStorage.getItem('salonCustomerToken'); }
+  else if (!path.startsWith('/api/auth/') && !path.startsWith('/api/customer/login') && !path.startsWith('/api/customer/register') && path !== '/api/customer/verify-registration' && path !== '/api/public/salons' && path !== '/api/public/categories' && path !== '/api/health') { headers['x-salon-slug'] = publicContext.salon; if (publicContext.branch) headers['x-branch-id'] = publicContext.branch; if (sessionStorage.getItem('salonCustomerToken')) headers['x-customer-token'] = sessionStorage.getItem('salonCustomerToken'); }
   let response;
   try { response = await fetch(`${API_BASE}${path}`, { ...options, headers }); }
   catch { throw new Error('Could not connect. Check your internet connection and try again.'); }
@@ -753,23 +756,74 @@ $('#settingsForm').addEventListener('submit', async (event) => {
 $('#addService').addEventListener('click', async () => { const name = prompt('Service name (e.g. haircut)'); if (!name) return; const price = Number(prompt('Price (₹)', '299')); const duration = Number(prompt('Service duration in minutes', '30')); const category = prompt('Category (e.g. Hair, Beard, Skin)', 'Hair') || 'Hair'; const description = prompt('Short description', '') || ''; try { await api('/api/admin/services', { method: 'POST', body: JSON.stringify({ name, price, minutes: duration, category, description }) }); notify('Service added and shown on your salon page.'); await loadSettings(); } catch (e) { notify(e.message, true); } });
 
 let nearbyCoordinates = null;
+let directoryCategoriesPromise = null;
+let directoryCategoriesLoaded = false;
+let directoryRequestId = 0;
+async function loadDirectoryCategories(selectedCategory = '') {
+  const select = $('#salonCategoryFilter');
+  if (!directoryCategoriesLoaded) {
+    directoryCategoriesPromise ||= api('/api/public/categories').then((categories) => {
+      select.innerHTML = '<option value="">All business types</option>' + categories.map((category) => `<option value="${escapeHtml(category.id)}">${escapeHtml(category.name)}</option>`).join('');
+      directoryCategoriesLoaded = true;
+    }).catch((error) => { directoryCategoriesPromise = null; $('#locationStatus').textContent = `Business types could not load: ${error.message}`; });
+    await directoryCategoriesPromise;
+  }
+  if (selectedCategory) select.value = selectedCategory;
+}
+function syncDirectoryUrl(query) {
+  if (resolveRoute().name !== 'salons') return;
+  const params = new URLSearchParams();
+  const city = $('#marketLocation')?.value.trim();
+  const category = $('#salonCategoryFilter')?.value;
+  const minPrice = $('#salonMinPrice')?.value.trim();
+  const maxPrice = $('#salonMaxPrice')?.value.trim();
+  const sort = $('#salonSort')?.value;
+  if (query) params.set('q', query);
+  if (city) params.set('city', city);
+  if (category) params.set('categoryId', category);
+  if (minPrice) params.set('minPrice', minPrice);
+  if (maxPrice) params.set('maxPrice', maxPrice);
+  if (sort && sort !== 'recommended') params.set('sort', sort);
+  const suffix = params.size ? `?${params.toString()}` : '';
+  history.replaceState({}, '', `/salons${suffix}`);
+}
 async function loadSalonDirectory(query = '') {
+  const requestId = ++directoryRequestId;
   try {
     const params = new URLSearchParams();
     if (query) params.set('q', query);
     const city = $('#marketLocation')?.value.trim();
     if (city) params.set('city', city);
+    const categoryId = $('#salonCategoryFilter')?.value;
+    const minPrice = $('#salonMinPrice')?.value.trim();
+    const maxPrice = $('#salonMaxPrice')?.value.trim();
+    const sort = $('#salonSort')?.value || 'recommended';
+    if (categoryId) params.set('categoryId', categoryId);
+    if (minPrice) params.set('minPrice', minPrice);
+    if (maxPrice) params.set('maxPrice', maxPrice);
+    if (sort !== 'recommended') params.set('sort', sort);
     if (nearbyCoordinates) { params.set('lat', nearbyCoordinates.latitude); params.set('lng', nearbyCoordinates.longitude); }
     const rows = await api(`/api/public/salons${params.size ? `?${params.toString()}` : ''}`);
-    const sort = $('#salonSort')?.value;
-    if (sort === 'rating') rows.sort((a, b) => (b.averageRating ?? -1) - (a.averageRating ?? -1) || (b.ratingCount ?? 0) - (a.ratingCount ?? 0));
-    if (sort === 'distance') rows.sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
-    $('#salonGrid').innerHTML = rows.length ? rows.map(s => `<article class="salon-card"><span class="eyebrow">${escapeHtml(s.country || 'SALON')}${s.distanceKm !== null ? ` &middot; ${s.distanceKm} KM AWAY` : ''}</span><h3>${escapeHtml(s.name)}</h3><div class="salon-rating">${s.averageRating !== null ? `&#9733; ${s.averageRating} <span>(${s.ratingCount} review${s.ratingCount === 1 ? '' : 's'})</span>` : 'New &middot; no reviews yet'}</div><p>${escapeHtml(s.branchName)}${s.city ? ` &middot; ${escapeHtml(s.city)}` : ''}${s.country ? `, ${escapeHtml(s.country)}` : ''}</p><div><span>${escapeHtml(s.currency)}</span><a class="text-button" href="/salon/${encodeURIComponent(s.slug)}?branch=${encodeURIComponent(s.branchId)}">View &amp; book &rarr;</a></div></article>`).join('') : '<p class="empty-state">No listed locations match that search. Try another city or country.</p>';
-  } catch (error) { $('#salonGrid').innerHTML = `<p class="loading">${escapeHtml(error.message)}</p>`; }
+    if (requestId !== directoryRequestId) return;
+    $('#salonGrid').innerHTML = rows.length ? rows.map((s) => {
+      const serviceRows = (s.services || []).map((service) => `<li class="directory-service"><span><strong>${escapeHtml(service.name)}</strong><small>${service.minutes ? `${service.minutes} min` : escapeHtml(service.category || 'Service')}</small></span><b>${escapeHtml(moneyFor(service.price, s.currency || 'INR'))}</b></li>`).join('');
+      const countNote = s.serviceCount > 3 ? `<span class="directory-more">+${s.serviceCount - 3} more</span>` : '';
+      const startingPrice = s.startingPrice === null ? 'Prices not listed yet' : `From ${escapeHtml(moneyFor(s.startingPrice, s.currency || 'INR'))}`;
+      return `<article class="salon-card"><span class="eyebrow">${escapeHtml(s.categoryName || 'Beauty and wellness')}${s.distanceKm !== null ? ` &middot; ${s.distanceKm} km away` : ''}</span><h3>${escapeHtml(s.name)}</h3><div class="salon-rating">${s.averageRating !== null ? `&#9733; ${s.averageRating} <span>(${s.ratingCount} review${s.ratingCount === 1 ? '' : 's'})</span>` : 'New &middot; no reviews yet'}</div><p>${escapeHtml(s.branchName || '')}${s.city ? ` &middot; ${escapeHtml(s.city)}` : ''}${s.country ? `, ${escapeHtml(s.country)}` : ''}</p>${serviceRows ? `<ul class="directory-service-list" aria-label="Services and prices">${serviceRows}${countNote}</ul>` : '<p class="directory-no-prices">This business has not added bookable services yet.</p>'}<div class="directory-card-footer"><span><strong>${startingPrice}</strong>${s.serviceCount ? `<small>${s.serviceCount} listed service${s.serviceCount === 1 ? '' : 's'}</small>` : ''}</span><a class="text-button" href="/salon/${encodeURIComponent(s.slug)}?branch=${encodeURIComponent(s.branchId)}">View &amp; book &rarr;</a></div></article>`;
+    }).join('') : '<p class="empty-state">No businesses or bookable services match these filters. Try another service, city or price range.</p>';
+    $('#locationStatus').textContent = rows.length ? `${rows.length} business${rows.length === 1 ? '' : 'es'} found. Compare matching services, upfront prices and ratings below.` : 'No matching results yet. Try a broader search or change the price range.';
+    syncDirectoryUrl(query);
+  } catch (error) {
+    if (requestId !== directoryRequestId) return;
+    $('#salonGrid').innerHTML = `<p class="loading">${escapeHtml(error.message)}</p>`;
+    $('#locationStatus').textContent = error.message;
+  }
 }
-$('#useMyLocation').addEventListener('click',()=>{const status=$('#locationStatus');if(!navigator.geolocation){status.textContent='Location is not available in this browser. Search by city or country instead.';return;}status.textContent='Finding salons near you…';navigator.geolocation.getCurrentPosition(position=>{nearbyCoordinates={latitude:position.coords.latitude,longitude:position.coords.longitude};status.textContent='Nearby salons are sorted by distance from your current location.';loadSalonDirectory($('#salonSearch').value.trim());},error=>{status.textContent=error.code===1?'Location permission was declined. Search by city or country instead.':'Could not get your location. Search by city or country instead.';},{enableHighAccuracy:false,timeout:10000,maximumAge:300000});});
-let salonSearchTimer;$('#salonSearch').addEventListener('input',e=>{clearTimeout(salonSearchTimer);salonSearchTimer=setTimeout(()=>loadSalonDirectory(e.target.value.trim()),220);});
+$('#useMyLocation').addEventListener('click',()=>{const status=$('#locationStatus');if(!navigator.geolocation){status.textContent='Location is not available in this browser. Search by city or area instead.';return;}status.textContent='Finding nearby businesses…';navigator.geolocation.getCurrentPosition(position=>{nearbyCoordinates={latitude:position.coords.latitude,longitude:position.coords.longitude};status.textContent='Nearby businesses are sorted by distance from your current location.';loadSalonDirectory($('#salonSearch').value.trim());},error=>{status.textContent=error.code===1?'Location permission was declined. Search by city or area instead.':'Could not get your location. Search by city or area instead.';},{enableHighAccuracy:false,timeout:10000,maximumAge:300000});});
+let salonSearchTimer;$('#salonSearch').addEventListener('input',e=>{clearTimeout(salonSearchTimer);salonSearchTimer=setTimeout(()=>loadSalonDirectory(e.target.value.trim()),260);});
+$('#salonCategoryFilter').addEventListener('change',()=>loadSalonDirectory($('#salonSearch').value.trim()));
 $('#salonSort').addEventListener('change',()=>loadSalonDirectory($('#salonSearch').value.trim()));
+let salonPriceTimer;['#salonMinPrice','#salonMaxPrice'].forEach(selector=>$(selector).addEventListener('input',()=>{clearTimeout(salonPriceTimer);salonPriceTimer=setTimeout(()=>loadSalonDirectory($('#salonSearch').value.trim()),350);}));
 $('#marketSearchForm').addEventListener('submit',event=>{event.preventDefault();const params=new URLSearchParams();const query=$('#marketQuery').value.trim();const city=$('#marketLocation').value.trim();if(query)params.set('q',query);if(city)params.set('city',city);navigate(`/salons${params.size?`?${params.toString()}`:''}`);});
 
 function captureSalonLocation(formSelector){const form=$(formSelector);if(!navigator.geolocation){notify('Location sharing is not available in this browser. Add the map pin manually.',true);return;}navigator.geolocation.getCurrentPosition(position=>{form.elements.latitude.value=position.coords.latitude.toFixed(6);form.elements.longitude.value=position.coords.longitude.toFixed(6);notify('Salon map pin added.');},()=>notify('Could not get your location. Enter the map pin coordinates manually.',true),{enableHighAccuracy:true,timeout:12000});}

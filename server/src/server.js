@@ -711,11 +711,65 @@ app.get('/api/public/categories', async (_req, res, next) => {
 });
 app.get('/api/public/salons', async (req, res, next) => {
   try {
-    const platform = await readPlatform(); const q = String(req.query.q || '').toLowerCase(); const city = String(req.query.city || '').toLowerCase(); const country = String(req.query.country || '').toLowerCase();
+    const platform = await readPlatform();
+    const q = String(req.query.q || '').trim().slice(0, 100).toLowerCase();
+    const searchTerms = q.split(/[\s,]+/).map((term) => term.trim()).filter((term) => term.length > 1);
+    const matchesSearch = (value) => searchTerms.some((term) => String(value || '').toLowerCase().includes(term));
+    const city = String(req.query.city || '').trim().toLowerCase();
+    const country = String(req.query.country || '').trim().toLowerCase();
+    const categoryId = String(req.query.categoryId || '').trim();
+    const priceFilter = (value, name) => {
+      if (value === undefined || String(value).trim() === '') return null;
+      const amount = Number(value);
+      if (!Number.isFinite(amount) || amount < 0 || amount > 10000000) throw Object.assign(new Error(`Enter a valid ${name} price.`), { statusCode: 400 });
+      return amount;
+    };
+    const minPrice = priceFilter(req.query.minPrice, 'minimum');
+    const maxPrice = priceFilter(req.query.maxPrice, 'maximum');
+    if (minPrice !== null && maxPrice !== null && minPrice > maxPrice) return res.status(400).json({ error: 'Minimum price must be less than or equal to maximum price.' });
     const userLatitude = Number(req.query.lat); const userLongitude = Number(req.query.lng); const hasLocation = Number.isFinite(userLatitude) && userLatitude >= -90 && userLatitude <= 90 && Number.isFinite(userLongitude) && userLongitude >= -180 && userLongitude <= 180;
-    const locations = platform.tenants.filter((t) => t.active && (t.reviewStatus || 'approved') === 'approved' && (!q || `${t.name} ${t.branches.map((b) => `${b.city} ${b.country}`).join(' ')}`.toLowerCase().includes(q))).flatMap((t) => t.branches.filter((b) => b.active && (!city || b.city.toLowerCase().includes(city)) && (!country || b.country.toLowerCase() === country)).map((b) => ({ tenant: t, branch: b })));
-    const salons = await Promise.all(locations.map(async ({ tenant, branch }) => { const state = await readStateFor({ tenant, branch }); const reviews = state.reviews || []; const ratingCount = reviews.length; return { name: tenant.name, slug: tenant.slug, categoryId: tenant.categoryId || 'hair-salon', categoryName: tenant.categoryName || 'Hair salon and unisex salon', subcategoryId: tenant.subcategoryId || null, subcategoryName: tenant.subcategoryName || null, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone, latitude: branch.latitude ?? null, longitude: branch.longitude ?? null, averageRating: ratingCount ? Math.round(reviews.reduce((sum, review) => sum + review.rating, 0) / ratingCount * 10) / 10 : null, ratingCount, distanceKm: hasLocation && Number.isFinite(branch.latitude) && Number.isFinite(branch.longitude) ? Math.round(distanceKm(userLatitude, userLongitude, branch.latitude, branch.longitude) * 10) / 10 : null }; }));
-    if (hasLocation) salons.sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
+    const sort = ['recommended', 'price_asc', 'price_desc', 'rating', 'distance'].includes(String(req.query.sort || '')) ? String(req.query.sort) : 'recommended';
+    const categories = await getMarketplaceCategories();
+    const categoriesById = new Map(categories.map((category) => [category.id, category]));
+    const locations = platform.tenants.filter((tenant) => tenant.active && (tenant.reviewStatus || 'approved') === 'approved' && (!categoryId || tenant.categoryId === categoryId)).flatMap((tenant) => (tenant.branches || []).filter((branch) => branch.active && (!city || String(branch.city || '').toLowerCase().includes(city)) && (!country || String(branch.country || '').toLowerCase() === country)).map((branch) => ({ tenant, branch })));
+    const salons = (await Promise.all(locations.map(async ({ tenant, branch }) => {
+      const category = categoriesById.get(tenant.categoryId);
+      const subcategory = category?.subcategories?.find((item) => item.id === tenant.subcategoryId);
+      const categoryName = category?.name || tenant.categoryName || 'Beauty and wellness';
+      const subcategoryName = subcategory?.name || tenant.subcategoryName || null;
+      const state = await readStateFor({ tenant, branch });
+      const activeServices = (state.services || []).filter((service) => service.active === true);
+      const businessText = `${tenant.name} ${branch.name} ${branch.city || ''} ${branch.country || ''} ${categoryName} ${subcategoryName || ''}`.toLowerCase();
+      const businessMatchesQuery = !q || matchesSearch(businessText);
+      const priceServices = activeServices.filter((service) => Number.isFinite(Number(service.price)) && (minPrice === null || Number(service.price) >= minPrice) && (maxPrice === null || Number(service.price) <= maxPrice));
+      const serviceMatches = q ? priceServices.filter((service) => matchesSearch(`${service.name || ''} ${service.category || ''} ${service.description || ''}`)) : priceServices;
+      if (q && !businessMatchesQuery && !serviceMatches.length) return null;
+      if ((minPrice !== null || maxPrice !== null) && !priceServices.length) return null;
+      const resultServices = (serviceMatches.length ? serviceMatches : businessMatchesQuery ? priceServices : []).slice().sort((a, b) => Number(a.price) - Number(b.price));
+      const selectedServices = resultServices.slice(0, 3);
+      const reviews = state.reviews || [];
+      const ratingCount = reviews.length;
+      return {
+        name: tenant.name, slug: tenant.slug, categoryId: tenant.categoryId || 'hair-salon', categoryName,
+        subcategoryId: tenant.subcategoryId || null, subcategoryName,
+        branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country,
+        currency: branch.currency || 'INR', timeZone: branch.timeZone,
+        latitude: branch.latitude ?? null, longitude: branch.longitude ?? null,
+        averageRating: ratingCount ? Math.round(reviews.reduce((sum, review) => sum + review.rating, 0) / ratingCount * 10) / 10 : null,
+        ratingCount,
+        distanceKm: hasLocation && Number.isFinite(branch.latitude) && Number.isFinite(branch.longitude) ? Math.round(distanceKm(userLatitude, userLongitude, branch.latitude, branch.longitude) * 10) / 10 : null,
+        startingPrice: resultServices.length ? Number(resultServices[0].price) : null,
+        serviceCount: resultServices.length,
+        services: selectedServices.map((service) => ({ name: service.name, category: service.category || '', price: Number(service.price), minutes: Number(service.minutes) || null })),
+        _serviceMatch: Boolean(q && serviceMatches.length),
+      };
+    }))).filter(Boolean);
+    if (sort === 'price_asc') salons.sort((a, b) => (a.startingPrice ?? Infinity) - (b.startingPrice ?? Infinity));
+    else if (sort === 'price_desc') salons.sort((a, b) => (b.startingPrice ?? -Infinity) - (a.startingPrice ?? -Infinity));
+    else if (sort === 'rating') salons.sort((a, b) => (b.averageRating ?? -1) - (a.averageRating ?? -1) || (b.ratingCount ?? 0) - (a.ratingCount ?? 0));
+    else if (sort === 'distance' || hasLocation) salons.sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
+    else salons.sort((a, b) => Number(b._serviceMatch) - Number(a._serviceMatch) || (b.averageRating ?? -1) - (a.averageRating ?? -1));
+    for (const salon of salons) delete salon._serviceMatch;
     res.json(salons);
   } catch (e) { next(e); }
 });
