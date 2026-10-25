@@ -387,3 +387,57 @@ body[data-page="partner-signup"] .admin-shell{background:#f3f2ec;backdrop-filter
   .inventory-dialog-actions{flex-direction:column-reverse}
   .inventory-dialog-actions .button{width:100%}
 }
+
+/* Receipt preview and focused bill printing */
+.receipt-panel{display:grid;gap:14px;padding:18px;border:1px solid #e3e6de;border-radius:12px;background:#f8f9f5}
+.receipt-preview-head{display:flex;justify-content:space-between;align-items:center;gap:14px}
+.receipt-preview-head h2{margin:5px 0 0;font:500 21px "Playfair Display",serif}
+.receipt-preview-head p{margin:5px 0 0;color:#747d71;font-size:11px}
+.receipt-preview-head .button{min-height:42px;gap:8px;border-radius:8px;font-size:11px;white-space:nowrap}
+.receipt-preview-paper{padding:16px;border:1px dashed #d8ddd3;border-radius:10px;background:#fff}
+.salon-receipt{width:min(100%,560px);margin:0 auto;padding:22px 20px;background:#fff;color:#171b18;font:12px/1.45 Arial,Helvetica,sans-serif}
+.salon-receipt-header{display:grid;justify-items:center;gap:3px;padding-bottom:14px;text-align:center}
+.receipt-brand{color:#344d3b;font-size:18px;font-weight:800;letter-spacing:.19em}
+.salon-receipt-header h2{margin:3px 0 0;font:700 17px/1.25 Arial,Helvetica,sans-serif}
+.salon-receipt-header p{margin:0;color:#555;font-size:10px}
+.receipt-title{margin-top:9px;font-size:10px;letter-spacing:.13em}
+.receipt-meta{display:grid;gap:6px;padding:12px 0;border-top:1px dashed #999;border-bottom:1px dashed #999}
+.receipt-meta>div{display:flex;justify-content:space-between;gap:12px;font-size:10px}
+.receipt-meta span{color:#555}
+.receipt-meta strong{text-align:right;font-weight:600}
+.salon-receipt-items{width:100%;margin:12px 0 8px;border-collapse:collapse;table-layout:fixed}
+.salon-receipt-items th{padding:5px 2px;border-bottom:1px solid #555;font-size:9px;letter-spacing:.04em;text-align:left}
+.salon-receipt-items th:first-child{width:43%}
+.salon-receipt-items th:nth-child(2){width:10%;text-align:center}
+.salon-receipt-items th:nth-child(3),.salon-receipt-items th:nth-child(4){width:23.5%;text-align:right}
+.salon-receipt-items td{padding:8px 2px;border-bottom:1px dotted #bbb;font-size:10px;vertical-align:top;overflow-wrap:anywhere}
+.salon-receipt-items td.receipt-number{text-align:right;white-space:nowrap}
+.salon-receipt-items td:nth-child(2){text-align:center}
+.receipt-item strong,.receipt-item small{display:block}
+.receipt-item small{margin-top:2px;color:#666;font-size:9px}
+.receipt-totals{display:grid;gap:6px;padding:8px 0}
+.receipt-totals>div{display:flex;justify-content:space-between;gap:12px;font-size:10px}
+.receipt-grand-total{margin-top:3px;padding-top:8px;border-top:1px solid #444;font-size:13px!important;font-weight:700}
+.receipt-grand-total strong{font-size:15px}
+.receipt-payment{display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-top:1px dashed #999;border-bottom:1px dashed #999;font-size:10px}
+.receipt-payment strong{font-weight:700}
+.receipt-loyalty,.salon-receipt-footer{margin:10px 0 0;color:#555;font-size:9px;text-align:center}
+.salon-receipt-footer{padding-top:8px}
+.print-receipt{display:none}
+@page{margin:6mm}
+@media print{
+  html,body{width:100%!important;min-height:0!important;margin:0!important;padding:0!important;background:#fff!important}
+  body> *:not(#printReceipt){display:none!important}
+  body>#printReceipt{display:block!important;width:100%!important;max-width:80mm!important;margin:0 auto!important;padding:0!important;background:#fff!important;color:#111!important}
+  #printReceipt .salon-receipt{width:100%!important;max-width:80mm!important;margin:0 auto!important;padding:0!important;border:0!important;border-radius:0!important;box-shadow:none!important;font:11px/1.35 Arial,Helvetica,sans-serif!important;print-color-adjust:exact;-webkit-print-color-adjust:exact}
+  #printReceipt .salon-receipt-header{padding-bottom:10px}
+  #printReceipt .salon-receipt-header h2{font-size:15px}
+  #printReceipt .salon-receipt-items{margin:9px 0 6px}
+  #printReceipt .salon-receipt-items th{font-size:8px}
+  #printReceipt .salon-receipt-items td{padding:6px 1px;font-size:9px}
+  #printReceipt .receipt-meta>div,#printReceipt .receipt-payment,#printReceipt .receipt-totals>div{font-size:9px}
+  #printReceipt .receipt-grand-total,#printReceipt .receipt-grand-total strong{font-size:12px!important}
+  #printReceipt .receipt-item small{font-size:8px}
+  #printReceipt .salon-receipt-footer,#printReceipt .receipt-loyalty{font-size:8px}
+  #printReceipt .salon-receipt,#printReceipt .receipt-meta,#printReceipt .receipt-totals,#printReceipt .receipt-payment{break-inside:avoid;page-break-inside:avoid}
+}

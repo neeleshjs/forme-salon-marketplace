@@ -595,15 +595,26 @@ $$('[data-pos-type]').forEach((button) => button.addEventListener('click', () =>
 $('#posCustomer').addEventListener('change', () => { $('#redeemPoints').value = 0; renderCart(); });
 $('#posDiscount').addEventListener('input', renderCart); $('#redeemPoints').addEventListener('input', renderCart);
 $('#clearCart').addEventListener('click', () => { cart = []; renderCart(); showMessage($('#posMessage'), ''); });
+function createReceiptMarkup(order) {
+  const workspace = activeWorkspace || {}; const branch = [workspace.branchName, workspace.city, workspace.country].filter(Boolean).join(', ');
+  const issuedAt = new Date(order.createdAt).toLocaleString(currentLocale, { dateStyle: 'medium', timeStyle: 'short', timeZone: currentTimeZone });
+  const rows = (order.items || []).map((item) => `<tr><td class="receipt-item"><strong>${escapeHtml(item.name)}</strong><small>${item.type === 'product' ? 'Retail product' : 'Salon service'}</small></td><td class="receipt-number">${Number(item.quantity) || 0}</td><td class="receipt-number">${money(item.unitPrice)}</td><td class="receipt-number">${money(item.lineTotal)}</td></tr>`).join('');
+  return `<article class="salon-receipt"><header class="salon-receipt-header"><span class="receipt-brand">FORME</span><h2>${escapeHtml(workspace.tenantName || 'Salon')}</h2>${branch ? `<p>${escapeHtml(branch)}</p>` : ''}<strong class="receipt-title">PAYMENT RECEIPT</strong></header><div class="receipt-meta"><div><span>Bill number</span><strong>${escapeHtml(order.receipt)}</strong></div><div><span>Date and time</span><strong>${escapeHtml(issuedAt)}</strong></div><div><span>Customer</span><strong>${escapeHtml(order.customerName || 'Walk-in')}</strong></div>${order.phone ? `<div><span>Mobile</span><strong>${escapeHtml(order.phone)}</strong></div>` : ''}${order.appointmentReference ? `<div><span>Booking reference</span><strong>${escapeHtml(order.appointmentReference)}</strong></div>` : ''}</div><table class="salon-receipt-items"><thead><tr><th>ITEM</th><th>QTY</th><th>RATE</th><th>AMOUNT</th></tr></thead><tbody>${rows}</tbody></table><div class="receipt-totals"><div><span>Subtotal</span><strong>${money(order.subtotal)}</strong></div>${Number(order.discount) > 0 ? `<div><span>Discount / points</span><strong>−${money(order.discount)}</strong></div>` : ''}${Number(order.depositCredit) > 0 ? `<div><span>Booking advance used</span><strong>−${money(order.depositCredit)}</strong></div>` : ''}<div class="receipt-grand-total"><span>Total paid</span><strong>${money(order.total)}</strong></div></div><div class="receipt-payment"><span>Payment method</span><strong>${escapeHtml(String(order.paymentMethod || '').toUpperCase())} · PAID</strong></div>${Number(order.pointsEarned) > 0 ? `<p class="receipt-loyalty">${Number(order.pointsEarned)} loyalty points earned. Thank you!</p>` : ''}<footer class="salon-receipt-footer">Thank you for visiting. We look forward to seeing you again.</footer></article>`;
+}
 $('#checkoutButton').addEventListener('click', async () => {
+  if (!cart.length) { showMessage($('#posMessage'), 'Add a service or product before recording payment.', true); return; }
+  const button = $('#checkoutButton'); button.disabled = true;
   const customer = adminData.customers.find((c) => c.id === $('#posCustomer').value);
   showMessage($('#posMessage'), 'Recording payment...');
   try {
     const order = await api('/api/admin/orders', { method: 'POST', body: JSON.stringify({ items: cart.map((line) => ({ type: line.type, id: line.id, quantity: line.quantity })), phone: customer?.phone || '', customerName: customer?.name || '', appointmentReference: $('#posAppointmentReference').value.trim(), paymentMethod: $('#paymentMethod').value, discount: Number($('#posDiscount').value) || 0, redeemPoints: Number($('#redeemPoints').value) || 0 }) });
     $('#receiptPanel').hidden = false;
-    $('#receiptPanel').innerHTML = `<div class="receipt-content"><div><span class="eyebrow">PAYMENT RECORDED · ${escapeHtml(order.paymentMethod.toUpperCase())}</span><strong>${money(order.total)} received</strong><p>Receipt ${escapeHtml(order.receipt)} · ${escapeHtml(order.customerName)} · ${order.pointsEarned} loyalty points earned</p></div><button class="button button-outline" onclick="window.print()">Print receipt</button></div>`;
+    const receiptMarkup = createReceiptMarkup(order); const printNode = $('#printReceipt'); printNode.innerHTML = receiptMarkup;
+    $('#receiptPanel').innerHTML = `<div class="receipt-preview-head"><div><span class="eyebrow">PAYMENT SAVED</span><h2>Bill is ready</h2><p>Receipt ${escapeHtml(order.receipt)} · ${money(order.total)} paid</p></div><button class="button button-dark" id="printReceiptButton" type="button">Print bill</button></div><div class="receipt-preview-paper">${receiptMarkup}</div>`;
+    $('#printReceiptButton').addEventListener('click', () => { printNode.hidden = false; window.addEventListener('afterprint', () => { printNode.hidden = true; }, { once: true }); window.print(); });
     cart = []; $('#posDiscount').value = 0; $('#redeemPoints').value = 0; $('#posAppointmentReference').value = ''; showMessage($('#posMessage'), `Payment recorded. Stock and customer points updated.${order.depositCredit ? ` ${money(order.depositCredit)} booking advance applied.` : ''}`); await loadPos();
   } catch (error) { showMessage($('#posMessage'), error.message, true); }
+  finally { button.disabled = false; }
 });
 
 $('#customerSearch').addEventListener('input', () => loadCustomers().catch((e) => notify(e.message, true)));
