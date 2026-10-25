@@ -184,6 +184,48 @@ async function writeStateFor(scope, state) {
 
 function writeState(state) { return writeStateFor(scopeStorage.getStore(), state); }
 
+const stateMutationQueues = new Map();
+async function mutateStateSafely(mutator, scope = scopeStorage.getStore()) {
+  const key = stateDocumentKey(scope);
+  const overrides = scope?.branch ? { branchName: scope.branch.name, city: scope.branch.city, country: scope.branch.country, currency: scope.branch.currency, timeZone: scope.branch.timeZone, businessName: scope.tenant.name } : {};
+  if (databasePool) {
+    await ensureDatabase();
+    const client = await databasePool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key]);
+      const { rows } = await client.query('SELECT payload FROM forme_documents WHERE document_key = $1 FOR UPDATE', [key]);
+      const stored = rows[0]?.payload;
+      const base = initialState(overrides);
+      const state = Array.isArray(stored) ? { ...base, appointments: stored } : { ...base, ...(stored || {}), settings: { ...base.settings, ...(stored?.settings || {}) } };
+      const result = await mutator(state);
+      if (result?.persist !== false) {
+        await client.query(`INSERT INTO forme_documents (document_key, payload) VALUES ($1, $2::jsonb)
+          ON CONFLICT (document_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`, [key, JSON.stringify(state)]);
+      }
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+  const previous = stateMutationQueues.get(key) || Promise.resolve();
+  let release;
+  const lock = new Promise((resolve) => { release = resolve; });
+  stateMutationQueues.set(key, lock);
+  await previous;
+  try {
+    const state = await readStateFor(scope);
+    const result = await mutator(state);
+    if (result?.persist !== false) await writeStateFor(scope, state);
+    return result;
+  } finally {
+    release();
+    if (stateMutationQueues.get(key) === lock) stateMutationQueues.delete(key);
+  }
+}
+
 function hashPassword(password, salt = randomBytes(16).toString('hex')) {
   return { salt, hash: scryptSync(password, salt, 64).toString('hex') };
 }
@@ -503,24 +545,53 @@ function ensureCustomer(state, { name, phone, notes = '' }) {
   }
   return customer;
 }
-function slotAvailable(state, date, time, service, staffId, excludeId = null) {
+function availableStaffForSlot(state, date, time, service, excludeIds = []) {
   const weekday = weekdayFromDate(date);
-  const staffList = staffId ? [getStaff(state, staffId)].filter(Boolean) : state.staff.filter((s) => s.active);
-  return staffList.some((staff) => {
-    const start = minutes(time);
-    const end = start + service.minutes;
-    if (!state.settings.openDays.includes(weekday) || start < minutes(state.settings.openingTime) || end > minutes(state.settings.closingTime) || !staff.days.includes(weekday) || start < minutes(staff.start) || end > minutes(staff.end)) return false;
+  const start = minutes(time);
+  const end = start + service.minutes;
+  if (!state.settings.openDays.includes(weekday) || start < minutes(state.settings.openingTime) || end > minutes(state.settings.closingTime)) return [];
+  return state.staff.filter((staff) => {
+    if (!staff.active || !staff.days.includes(weekday) || start < minutes(staff.start) || end > minutes(staff.end)) return false;
     return !state.appointments.some((item) => {
-      if (item.id === excludeId || item.status === 'cancelled' || (item.status === 'awaiting-payment' && item.paymentExpiresAt && new Date(item.paymentExpiresAt) < new Date()) || item.staffId !== staff.id || item.date !== date) return false;
+      if (excludeIds.includes(item.id) || item.status === 'cancelled' || (item.status === 'awaiting-payment' && item.paymentExpiresAt && new Date(item.paymentExpiresAt) < new Date()) || item.staffId !== staff.id || item.date !== date) return false;
       const otherStart = minutes(item.time);
       const otherEnd = otherStart + Number(item.minutes || 30);
       return start < otherEnd && otherStart < end;
     });
   });
 }
+function slotAvailable(state, date, time, service, staffId, excludeId = null) {
+  const available = availableStaffForSlot(state, date, time, service, excludeId ? [excludeId] : []);
+  return staffId ? available.some((staff) => staff.id === staffId) : available.length > 0;
+}
 function assignStaff(state, date, time, service, preferredId, excludeId = null) {
   const candidates = preferredId ? [getStaff(state, preferredId)].filter(Boolean) : state.staff.filter((s) => s.active);
   return candidates.find((staff) => slotAvailable(state, date, time, service, staff.id, excludeId)) || null;
+}
+function assignStaffForParty(state, date, time, service, partySize, preferredStaffId = '', excludeIds = []) {
+  const available = availableStaffForSlot(state, date, time, service, excludeIds);
+  let candidates = available;
+  if (preferredStaffId) {
+    const preferred = available.find((staff) => staff.id === preferredStaffId);
+    if (!preferred) return [];
+    candidates = [preferred, ...available.filter((staff) => staff.id !== preferredStaffId)];
+  }
+  return candidates.length >= partySize ? candidates.slice(0, partySize) : [];
+}
+function bookingGroupAppointments(state, appointment, customerUserId = appointment?.customerUserId) {
+  if (!appointment) return [];
+  if (!appointment.groupId) return [appointment];
+  return state.appointments.filter((item) => item.groupId === appointment.groupId && item.customerUserId === customerUserId);
+}
+function confirmBookingGroup(appointments, { paymentStatus, paymentId = null } = {}) {
+  const paidAt = new Date().toISOString();
+  for (const appointment of appointments) {
+    appointment.status = 'confirmed';
+    appointment.paymentStatus = paymentStatus;
+    appointment.depositPaid = appointment.depositAmount;
+    appointment.paymentId = paymentId;
+    appointment.paidAt = paidAt;
+  }
 }
 function makeReference() { return randomBytes(4).toString('hex').toUpperCase(); }
 
@@ -541,9 +612,23 @@ app.post('/api/payments/webhook', async (req, res, next) => {
     const entity = req.body?.payload?.payment?.entity; if (!entity?.order_id || !entity?.id) return res.status(400).json({ error: 'Payment event is missing its order or payment ID.' });
     const platform = await readPlatform();
     for (const tenant of platform.tenants) for (const branch of tenant.branches || []) {
-      const scope = { tenant, branch }; const state = await readStateFor(scope); const record = (state.paymentRecords || []).find((item) => item.orderId === entity.order_id);
-      if (!record) continue; if (entity.amount !== record.amountMinor || entity.currency !== record.currency) return res.status(400).json({ error: 'Captured payment amount does not match the booking deposit.' }); const appointment = state.appointments.find((item) => item.id === record.appointmentId); if (!appointment) return res.status(404).json({ error: 'Payment booking was not found.' });
-      record.status = 'captured'; record.paymentId = entity.id; appointment.status = 'confirmed'; appointment.paymentStatus = 'deposit-paid'; appointment.depositPaid = appointment.depositAmount; appointment.paymentId = entity.id; appointment.paidAt = new Date().toISOString(); await writeStateFor(scope, state); return res.json({ received: true });
+      const scope = { tenant, branch };
+      const outcome = await mutateStateSafely((state) => {
+        const record = (state.paymentRecords || []).find((item) => item.orderId === entity.order_id);
+        if (!record) return { persist: false, found: false };
+        if (entity.amount !== record.amountMinor || entity.currency !== record.currency) return { persist: false, found: true, invalidAmount: true };
+        const appointmentIds = record.appointmentIds || [record.appointmentId];
+        const appointments = state.appointments.filter((item) => appointmentIds.includes(item.id));
+        if (!appointments.length) return { persist: false, found: true, missingAppointments: true };
+        if (record.status === 'captured' && record.paymentId === entity.id) return { persist: false, found: true };
+        record.status = 'captured'; record.paymentId = entity.id;
+        confirmBookingGroup(appointments, { paymentStatus: 'deposit-paid', paymentId: entity.id });
+        return { found: true };
+      }, scope);
+      if (!outcome.found) continue;
+      if (outcome.invalidAmount) return res.status(400).json({ error: 'Captured payment amount does not match the booking deposit.' });
+      if (outcome.missingAppointments) return res.status(404).json({ error: 'Payment booking was not found.' });
+      return res.json({ received: true });
     }
     res.status(404).json({ error: 'No booking matches this payment order.' });
   } catch (e) { next(e); }
@@ -754,7 +839,7 @@ app.get('/api/customer/bookings', async (req, res, next) => {
     const branches = scope.platform.tenants.flatMap((tenant) => (tenant.branches || []).map((branch) => ({ tenant, branch })));
     const bookings = (await Promise.all(branches.map(async ({ tenant, branch }) => {
       const state = await readStateFor({ tenant, branch });
-      return state.appointments.filter((item) => item.customerUserId === user.id).map((item) => ({ reference: item.reference, serviceName: item.serviceName, staffName: item.staffName, date: item.date, time: item.time, status: item.status, paymentStatus: item.paymentStatus, depositAmount: item.depositAmount, depositCurrency: item.depositCurrency, depositForfeited: item.depositForfeited, salonName: tenant.name, salonSlug: tenant.slug, branchName: branch.name, branchId: branch.id }));
+      return state.appointments.filter((item) => item.customerUserId === user.id).map((item) => ({ reference: item.reference, serviceName: item.serviceName, staffName: item.staffName, groupId: item.groupId || null, groupIndex: item.groupIndex || 1, partySize: item.partySize || 1, date: item.date, time: item.time, status: item.status, paymentStatus: item.paymentStatus, depositAmount: item.depositAmount, depositCurrency: item.depositCurrency, depositForfeited: item.depositForfeited, salonName: tenant.name, salonSlug: tenant.slug, branchName: branch.name, branchId: branch.id }));
     }))).flat();
     bookings.sort((a, b) => `${b.date}${b.time}`.localeCompare(`${a.date}${a.time}`));
     res.json(bookings);
@@ -768,6 +853,9 @@ app.get('/api/availability', async (req, res, next) => {
     const service = getService(state, req.query.serviceId);
     const date = String(req.query.date || '');
     if (!service || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Choose a service and valid date.' });
+    const partySize = Number(req.query.partySize || 1);
+    if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) return res.status(400).json({ error: 'Choose between 1 and 4 people.' });
+    const preferredStaffId = String(req.query.staffId || '');
     const weekday = weekdayFromDate(date);
     const slots = [];
     const open = minutes(state.settings.openingTime);
@@ -775,10 +863,10 @@ app.get('/api/availability', async (req, res, next) => {
     for (let start = open; start < close; start += SLOT_STEP) {
       const time = `${String(Math.floor(start / 60)).padStart(2, '0')}:${String(start % 60).padStart(2, '0')}`;
       if (wallTimeInZone(date, time, state.settings.timeZone || scopeStorage.getStore()?.branch.timeZone || 'Etc/UTC') <= new Date()) continue;
-      const staff = state.settings.openDays.includes(weekday) ? state.staff.filter((s) => s.active && s.days.includes(weekday) && start >= minutes(s.start) && start + service.minutes <= minutes(s.end) && slotAvailable(state, date, time, service, s.id)) : [];
-      if (staff.length) slots.push({ time, staff: staff.map(({ id, name, role, color }) => ({ id, name, role, color })) });
+      const staff = state.settings.openDays.includes(weekday) ? availableStaffForSlot(state, date, time, service) : [];
+      if (staff.length >= partySize && (!preferredStaffId || staff.some((member) => member.id === preferredStaffId))) slots.push({ time, staff: staff.map(({ id, name, role, color }) => ({ id, name, role, color })) });
     }
-    res.json({ date, service, slots });
+    res.json({ date, service, partySize, slots });
   } catch (e) { next(e); }
 });
 
@@ -787,17 +875,29 @@ app.post('/api/appointments', async (req, res, next) => {
     const scope = scopeStorage.getStore(); const customerUser = customerFromRequest(req, scope.platform);
     if (!customerUser) return res.status(401).json({ error: 'Create an account or sign in before booking.' });
     if (req.body?.depositPolicyAccepted !== true) return res.status(400).json({ error: 'Please accept the booking advance and no-show policy.' });
-    const { serviceId, staffId, date, time, notes = '' } = req.body || {}; const { name, phone } = customerUser;
-    const state = await readState(); const service = getService(state, serviceId);
-    if (!service) return res.status(400).json({ error: 'Choose a valid service.' });
+    const { serviceId, staffId = '', date, time, notes = '' } = req.body || {}; const { name, phone } = customerUser;
+    const partySize = Number(req.body?.partySize || 1);
+    if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) return res.status(400).json({ error: 'Choose between 1 and 4 people.' });
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || !/^\d{2}:\d{2}$/.test(time || '')) return res.status(400).json({ error: 'Choose a valid date and time.' });
-    if (wallTimeInZone(date, time, state.settings.timeZone || scope.branch.timeZone || 'Etc/UTC') <= new Date()) return res.status(400).json({ error: 'Choose a future time.' });
-    const staff = assignStaff(state, date, time, service, staffId); if (!staff) return res.status(409).json({ error: 'That time just filled up. Please choose another slot.' });
-    const customer = ensureCustomer(state, { name, phone, notes: typeof notes === 'string' ? notes.trim().slice(0, 300) : '' });
-    const depositPercent = 25; const depositAmount = Math.max(1, Math.round(service.price * depositPercent / 100));
-    const appointment = { id: randomUUID(), reference: makeReference(), customerId: customer.id, customerUserId: customerUser.id, customerEmail: customerUser.email, name, phone, serviceId, serviceName: service.name, minutes: service.minutes, price: service.price, staffId: staff.id, staffName: staff.name, date, time, notes: typeof notes === 'string' ? notes.trim().slice(0, 300) : '', status: 'awaiting-payment', paymentStatus: 'deposit_due', depositAmount, depositCurrency: scope.branch.currency || state.settings.currency || 'INR', depositPercent, depositForfeited: false, paymentExpiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), createdAt: new Date().toISOString() };
-    state.appointments.push(appointment); await writeState(state);
-    res.status(201).json({ appointment: { reference: appointment.reference, name, serviceName: service.name, staffName: staff.name, date, time, minutes: service.minutes, price: service.price, status: appointment.status, depositAmount, depositCurrency: appointment.depositCurrency, depositPercent } });
+    if (wallTimeInZone(date, time, scope.branch?.timeZone || 'Etc/UTC') <= new Date()) return res.status(400).json({ error: 'Choose a future time.' });
+    const outcome = await mutateStateSafely((state) => {
+      const service = getService(state, serviceId);
+      if (!service) return { persist: false, httpStatus: 400, error: 'Choose a valid service.' };
+      const assignedStaff = assignStaffForParty(state, date, time, service, partySize, staffId);
+      if (assignedStaff.length !== partySize) return { persist: false, httpStatus: 409, error: `That time needs ${partySize} available team member${partySize === 1 ? '' : 's'}. Please choose another time.` };
+      const customer = ensureCustomer(state, { name, phone, notes: typeof notes === 'string' ? notes.trim().slice(0, 300) : '' });
+      const depositPercent = 25; const groupId = partySize > 1 ? randomUUID() : null; const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      const appointments = assignedStaff.map((staff, index) => {
+        const depositAmount = Math.max(1, Math.round(service.price * depositPercent / 100));
+        const appointment = { id: randomUUID(), reference: makeReference(), groupId, groupIndex: index + 1, partySize, customerId: customer.id, customerUserId: customerUser.id, customerEmail: customerUser.email, name, phone, serviceId, serviceName: service.name, minutes: service.minutes, price: service.price, staffId: staff.id, staffName: staff.name, date, time, notes: typeof notes === 'string' ? notes.trim().slice(0, 300) : '', status: 'awaiting-payment', paymentStatus: 'deposit_due', depositAmount, depositCurrency: scope.branch.currency || state.settings.currency || 'INR', depositPercent, depositForfeited: false, paymentExpiresAt: expiresAt, createdAt: new Date().toISOString() };
+        state.appointments.push(appointment);
+        return appointment;
+      });
+      const depositTotal = appointments.reduce((total, appointment) => total + appointment.depositAmount, 0);
+      return { appointment: { reference: appointments[0].reference, groupId, partySize, name, serviceName: service.name, staffName: appointments[0].staffName, staffNames: assignedStaff.map((member) => member.name), date, time, minutes: service.minutes, price: service.price * partySize, status: 'awaiting-payment', depositAmount: depositTotal, depositCurrency: appointments[0].depositCurrency, depositPercent }, appointments: appointments.map((appointment) => ({ reference: appointment.reference, staffName: appointment.staffName, groupIndex: appointment.groupIndex, partySize: appointment.partySize })), groupId, partySize };
+    }, scope);
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.status(201).json(outcome);
   } catch (e) { next(e); }
 });
 
@@ -806,13 +906,23 @@ app.post('/api/payments/order', async (req, res, next) => {
     const scope = scopeStorage.getStore(); const user = customerFromRequest(req, scope.platform); if (!user) return res.status(401).json({ error: 'Sign in to pay your booking deposit.' });
     const state = await readState(); const appointment = state.appointments.find((item) => item.reference === String(req.body?.reference || '').toUpperCase() && item.customerUserId === user.id);
     if (!appointment || appointment.status !== 'awaiting-payment' || new Date(appointment.paymentExpiresAt) < new Date()) return res.status(409).json({ error: 'This booking hold expired. Please choose a time again.' });
-    const currency = appointment.depositCurrency; const amountMinor = Math.round(appointment.depositAmount * (['JPY','KRW','VND','CLP'].includes(currency) ? 1 : 100));
+    const appointments = bookingGroupAppointments(state, appointment, user.id);
+    if (appointments.some((item) => item.status !== 'awaiting-payment' || new Date(item.paymentExpiresAt) < new Date())) return res.status(409).json({ error: 'One or more group booking holds expired. Please choose a time again.' });
+    const currency = appointment.depositCurrency; const depositTotal = appointments.reduce((total, item) => total + Number(item.depositAmount || 0), 0); const amountMinor = Math.round(depositTotal * (['JPY','KRW','VND','CLP'].includes(currency) ? 1 : 100));
     const keyId = process.env.RAZORPAY_KEY_ID; const keySecret = process.env.RAZORPAY_KEY_SECRET;
-    if (!keyId || !keySecret) return res.json({ mode: 'demo', reference: appointment.reference, amount: appointment.depositAmount, currency, message: 'Demo payment only. No money will be charged.' });
+    if (!keyId || !keySecret) return res.json({ mode: 'demo', reference: appointment.reference, amount: depositTotal, currency, partySize: appointments.length, references: appointments.map((item) => item.reference), message: 'Demo payment only. No money will be charged.' });
     const auth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
     const response = await fetch('https://api.razorpay.com/v1/orders', { method: 'POST', headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: amountMinor, currency, receipt: appointment.reference, notes: { salon: scope.tenant.name, branch: scope.branch.name, appointment: appointment.reference } }) });
     const order = await response.json(); if (!response.ok) return res.status(502).json({ error: order.error?.description || 'Could not start online payment.' });
-    state.paymentRecords ||= []; state.paymentRecords.push({ id: randomUUID(), appointmentId: appointment.id, customerUserId: user.id, provider: 'razorpay', orderId: order.id, amount: appointment.depositAmount, amountMinor, currency, status: 'created', createdAt: new Date().toISOString() }); await writeState(state);
+    const recordResult = await mutateStateSafely((latest) => {
+      const current = latest.appointments.find((item) => item.id === appointment.id && item.customerUserId === user.id);
+      const group = bookingGroupAppointments(latest, current, user.id);
+      if (!current || group.length !== appointments.length || group.some((item) => item.status !== 'awaiting-payment' || new Date(item.paymentExpiresAt) < new Date())) return { persist: false, ok: false };
+      latest.paymentRecords ||= [];
+      latest.paymentRecords.push({ id: randomUUID(), appointmentId: current.id, appointmentIds: group.map((item) => item.id), groupId: current.groupId || null, customerUserId: user.id, provider: 'razorpay', orderId: order.id, amount: depositTotal, amountMinor, currency, status: 'created', createdAt: new Date().toISOString() });
+      return { ok: true };
+    }, scope);
+    if (!recordResult.ok) return res.status(409).json({ error: 'This booking hold changed while payment was starting. Please choose a time again.' });
     res.json({ mode: 'razorpay', keyId, orderId: order.id, amount: amountMinor, currency, name: scope.tenant.name, description: `${appointment.depositPercent}% booking advance · ${appointment.reference}`, prefill: { name: user.name, email: user.email, contact: user.phone } });
   } catch (e) { next(e); }
 });
@@ -820,9 +930,17 @@ app.post('/api/payments/demo-confirm', async (req, res, next) => {
   try {
     if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) return res.status(403).json({ error: 'Demo payments are disabled while Razorpay is configured.' });
     const scope = scopeStorage.getStore(); const user = customerFromRequest(req, scope.platform); if (!user) return res.status(401).json({ error: 'Sign in to confirm this payment.' });
-    const state = await readState(); const appointment = state.appointments.find((item) => item.reference === String(req.body?.reference || '').toUpperCase() && item.customerUserId === user.id && item.status === 'awaiting-payment');
-    if (!appointment || new Date(appointment.paymentExpiresAt) < new Date()) return res.status(409).json({ error: 'The booking hold expired. Choose another time.' });
-    appointment.status = 'confirmed'; appointment.paymentStatus = 'demo-paid'; appointment.depositPaid = appointment.depositAmount; appointment.paidAt = new Date().toISOString(); state.paymentRecords ||= []; state.paymentRecords.push({ id: randomUUID(), appointmentId: appointment.id, customerUserId: user.id, provider: 'demo', amount: appointment.depositAmount, currency: appointment.depositCurrency, status: 'demo-paid', createdAt: new Date().toISOString() }); await writeState(state); res.json({ reference: appointment.reference, status: appointment.status, paymentStatus: appointment.paymentStatus, depositAmount: appointment.depositAmount, currency: appointment.depositCurrency, demo: true });
+    const outcome = await mutateStateSafely((state) => {
+      const appointment = state.appointments.find((item) => item.reference === String(req.body?.reference || '').toUpperCase() && item.customerUserId === user.id);
+      const appointments = bookingGroupAppointments(state, appointment, user.id);
+      if (!appointment || appointments.some((item) => item.status !== 'awaiting-payment' || new Date(item.paymentExpiresAt) < new Date())) return { persist: false, error: 'The booking hold expired. Choose another time.' };
+      const depositTotal = appointments.reduce((total, item) => total + Number(item.depositAmount || 0), 0);
+      confirmBookingGroup(appointments, { paymentStatus: 'demo-paid' });
+      state.paymentRecords ||= []; state.paymentRecords.push({ id: randomUUID(), appointmentId: appointment.id, appointmentIds: appointments.map((item) => item.id), groupId: appointment.groupId || null, customerUserId: user.id, provider: 'demo', amount: depositTotal, currency: appointment.depositCurrency, status: 'demo-paid', createdAt: new Date().toISOString() });
+      return { reference: appointment.reference, status: appointment.status, paymentStatus: appointment.paymentStatus, depositAmount: depositTotal, currency: appointment.depositCurrency, partySize: appointments.length, references: appointments.map((item) => item.reference), demo: true };
+    }, scope);
+    if (outcome.error) return res.status(409).json({ error: outcome.error });
+    res.json(outcome);
   } catch (e) { next(e); }
 });
 app.post('/api/payments/verify', async (req, res, next) => {
@@ -834,9 +952,18 @@ app.post('/api/payments/verify', async (req, res, next) => {
     if (expected.length !== received.length || !timingSafeEqual(expected, received)) return res.status(400).json({ error: 'Payment signature verification failed.' });
     const auth = Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64'); const response = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, { headers: { Authorization: `Basic ${auth}` } }); const payment = await response.json();
     if (!response.ok || payment.order_id !== orderId || payment.status !== 'captured' || payment.amount !== record.amountMinor || payment.currency !== record.currency) return res.status(409).json({ error: 'Payment is not captured for the expected deposit. Check status or try again.' });
-    const appointment = state.appointments.find((item) => item.id === record.appointmentId); if (!appointment) return res.status(404).json({ error: 'Booking not found.' });
-    appointment.status = 'confirmed'; appointment.paymentStatus = 'deposit-paid'; appointment.depositPaid = appointment.depositAmount; appointment.paymentId = paymentId; appointment.paidAt = new Date().toISOString(); record.status = 'captured'; record.paymentId = paymentId; await writeState(state);
-    res.json({ reference: appointment.reference, status: appointment.status, paymentStatus: appointment.paymentStatus, depositAmount: appointment.depositAmount, currency: appointment.depositCurrency });
+    const outcome = await mutateStateSafely((latest) => {
+      const latestRecord = (latest.paymentRecords || []).find((item) => item.orderId === orderId && item.customerUserId === user.id);
+      if (!latestRecord) return { persist: false, error: 'Payment booking was not found.' };
+      const appointmentIds = latestRecord.appointmentIds || [latestRecord.appointmentId];
+      const appointments = latest.appointments.filter((item) => appointmentIds.includes(item.id));
+      if (!appointments.length) return { persist: false, error: 'Payment booking was not found.' };
+      confirmBookingGroup(appointments, { paymentStatus: 'deposit-paid', paymentId });
+      latestRecord.status = 'captured'; latestRecord.paymentId = paymentId;
+      return { reference: appointments[0].reference, status: 'confirmed', paymentStatus: 'deposit-paid', depositAmount: latestRecord.amount, currency: latestRecord.currency, partySize: appointments.length, references: appointments.map((item) => item.reference) };
+    }, scope);
+    if (outcome.error) return res.status(404).json({ error: outcome.error });
+    res.json(outcome);
   } catch (e) { next(e); }
 });
 
@@ -845,26 +972,32 @@ app.post('/api/booking/lookup', async (req, res, next) => {
     const state = await readState();
     const item = state.appointments.find((a) => a.reference === String(req.body?.reference || '').toUpperCase() && a.phone === String(req.body?.phone || '').trim());
     if (!item) return res.status(404).json({ error: 'Booking reference or phone number does not match.' });
-    res.json({ reference: item.reference, name: item.name, serviceId: item.serviceId, serviceName: item.serviceName, staffId: item.staffId, staffName: item.staffName, date: item.date, time: item.time, minutes: item.minutes, price: item.price, status: item.status });
+    res.json({ reference: item.reference, name: item.name, serviceId: item.serviceId, serviceName: item.serviceName, staffId: item.staffId, staffName: item.staffName, date: item.date, time: item.time, minutes: item.minutes, price: item.price, status: item.status, partySize: item.partySize || 1 });
   } catch (e) { next(e); }
 });
 app.patch('/api/booking/:reference', async (req, res, next) => {
   try {
-    const state = await readState();
-    const item = state.appointments.find((a) => a.reference === req.params.reference.toUpperCase());
-    if (!item || item.phone !== String(req.body?.phone || '').trim()) return res.status(404).json({ error: 'Booking reference or phone number does not match.' });
-    if (req.body.action === 'cancel') {
-      if (item.status === 'completed') return res.status(409).json({ error: 'Completed visits cannot be cancelled.' });
-      item.status = 'cancelled';
-    } else if (req.body.action === 'reschedule') {
-      const service = getService(state, item.serviceId);
-      const staff = assignStaff(state, req.body.date, req.body.time, service, req.body.staffId || item.staffId, item.id) || assignStaff(state, req.body.date, req.body.time, service, null, item.id);
-      if (!staff || wallTimeInZone(req.body.date, req.body.time, state.settings.timeZone || scopeStorage.getStore()?.branch.timeZone || 'Etc/UTC') <= new Date()) return res.status(409).json({ error: 'That time is not available. Choose another slot.' });
-      item.date = req.body.date; item.time = req.body.time; item.staffId = staff.id; item.staffName = staff.name; item.status = 'confirmed';
-    } else return res.status(400).json({ error: 'Choose reschedule or cancel.' });
-    item.updatedAt = new Date().toISOString();
-    await writeState(state);
-    res.json({ reference: item.reference, status: item.status, date: item.date, time: item.time, staffName: item.staffName });
+    const scope = scopeStorage.getStore();
+    const outcome = await mutateStateSafely((state) => {
+      const item = state.appointments.find((appointment) => appointment.reference === req.params.reference.toUpperCase());
+      if (!item || item.phone !== String(req.body?.phone || '').trim()) return { persist: false, httpStatus: 404, error: 'Booking reference or phone number does not match.' };
+      const group = bookingGroupAppointments(state, item);
+      if (req.body.action === 'cancel') {
+        if (group.some((appointment) => appointment.status === 'completed')) return { persist: false, httpStatus: 409, error: 'Completed visits cannot be cancelled.' };
+        for (const appointment of group) { appointment.status = 'cancelled'; appointment.updatedAt = new Date().toISOString(); }
+      } else if (req.body.action === 'reschedule') {
+        const service = getService(state, item.serviceId);
+        const date = String(req.body.date || ''); const time = String(req.body.time || '');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return { persist: false, httpStatus: 400, error: 'Choose a valid date and time.' };
+        if (!service || wallTimeInZone(date, time, state.settings.timeZone || scope.branch.timeZone || 'Etc/UTC') <= new Date()) return { persist: false, httpStatus: 409, error: 'That time is not available. Choose another slot.' };
+        const assignedStaff = assignStaffForParty(state, date, time, service, group.length, req.body.staffId || item.staffId, group.map((appointment) => appointment.id));
+        if (assignedStaff.length !== group.length) return { persist: false, httpStatus: 409, error: `That time needs ${group.length} available team member${group.length === 1 ? '' : 's'}. Choose another time.` };
+        group.forEach((appointment, index) => { appointment.date = date; appointment.time = time; appointment.staffId = assignedStaff[index].id; appointment.staffName = assignedStaff[index].name; appointment.updatedAt = new Date().toISOString(); });
+      } else return { persist: false, httpStatus: 400, error: 'Choose reschedule or cancel.' };
+      return { reference: item.reference, status: item.status, date: item.date, time: item.time, staffName: item.staffName, partySize: group.length, references: group.map((appointment) => appointment.reference), staffNames: group.map((appointment) => appointment.staffName) };
+    }, scope);
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.json(outcome);
   } catch (e) { next(e); }
 });
 
@@ -928,21 +1061,24 @@ app.get('/api/admin/appointments', async (req, res, next) => {
 });
 app.patch('/api/admin/appointments/:id', async (req, res, next) => {
   try {
-    const s = await readState();
-    const item = s.appointments.find((a) => a.id === req.params.id);
-    if (!item) return res.status(404).json({ error: 'Appointment not found.' });
     const { status, date, time, staffId } = req.body || {};
     if (status && !['confirmed', 'completed', 'cancelled', 'arrived', 'in-service', 'no-show'].includes(status)) return res.status(400).json({ error: 'Invalid status.' });
-    if (date || time || staffId) {
-      const service = getService(s, item.serviceId);
-      const newDate = date || item.date; const newTime = time || item.time;
-      const staff = assignStaff(s, newDate, newTime, service, staffId || item.staffId, item.id);
-      if (!staff) return res.status(409).json({ error: 'That chair is no longer available.' });
-      item.date = newDate; item.time = newTime; item.staffId = staff.id; item.staffName = staff.name;
-    }
-    if (status) { item.status = status; if (status === 'no-show' && Number(item.depositPaid) > 0) { item.depositForfeited = true; item.paymentStatus = 'forfeited'; item.depositForfeitedAt = new Date().toISOString(); } }
-    item.updatedAt = new Date().toISOString();
-    await writeState(s); res.json(item);
+    const outcome = await mutateStateSafely((state) => {
+      const item = state.appointments.find((appointment) => appointment.id === req.params.id);
+      if (!item) return { persist: false, httpStatus: 404, error: 'Appointment not found.' };
+      if (date || time || staffId) {
+        const service = getService(state, item.serviceId);
+        const newDate = date || item.date; const newTime = time || item.time;
+        const staff = service && assignStaff(state, newDate, newTime, service, staffId || item.staffId, item.id);
+        if (!staff) return { persist: false, httpStatus: 409, error: 'That chair is no longer available.' };
+        item.date = newDate; item.time = newTime; item.staffId = staff.id; item.staffName = staff.name;
+      }
+      if (status) { item.status = status; if (status === 'no-show' && Number(item.depositPaid) > 0) { item.depositForfeited = true; item.paymentStatus = 'forfeited'; item.depositForfeitedAt = new Date().toISOString(); } }
+      item.updatedAt = new Date().toISOString();
+      return item;
+    });
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.json(outcome);
   } catch (e) { next(e); }
 });
 app.get('/api/admin/staff', async (_req, res, next) => { try { res.json((await readState()).staff); } catch (e) { next(e); } });

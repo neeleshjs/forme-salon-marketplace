@@ -219,17 +219,18 @@ async function loadPublicData() {
 async function refreshAvailableTimes({ preserve = false } = {}) {
   const serviceId = $('#serviceSelect').value;
   const date = $('#dateInput').value;
+  const partySize = Number($('#partySizeSelect').value || 1);
   const select = $('#timeSelect');
   const previous = preserve ? select.value : '';
   if (!serviceId || !date) { select.innerHTML = '<option value="">Choose service and date first</option>'; availability = []; return; }
   select.innerHTML = '<option value="">Checking the schedule…</option>';
   select.disabled = true;
   try {
-    const result = await api(`/api/availability?serviceId=${encodeURIComponent(serviceId)}&date=${encodeURIComponent(date)}`);
+    const result = await api(`/api/availability?serviceId=${encodeURIComponent(serviceId)}&date=${encodeURIComponent(date)}&partySize=${partySize}&staffId=${encodeURIComponent($('#staffSelect').value)}`);
     availability = result.slots;
     const barberId = $('#staffSelect').value;
     const choices = availability.filter((slot) => !barberId || slot.staff.some((person) => person.id === barberId));
-    select.innerHTML = choices.length ? '<option value="">Select an available time</option>' + choices.map((slot) => `<option value="${slot.time}">${displayTime(slot.time)} - ${barberId ? 'Available' : slot.staff.map((b) => escapeHtml(b.name.split(' ')[0])).join(', ')}</option>`).join('') : '<option value="">No times available. Try another date.</option>';
+    select.innerHTML = choices.length ? '<option value="">Select an available time</option>' + choices.map((slot) => `<option value="${slot.time}">${displayTime(slot.time)} - ${slot.staff.length} team member${slot.staff.length === 1 ? '' : 's'} available</option>`).join('') : `<option value="">No time has ${partySize} available team member${partySize === 1 ? '' : 's'}. Try another date.</option>`;
     if (choices.some((slot) => slot.time === previous)) select.value = previous;
   } catch (error) { select.innerHTML = `<option value="">${escapeHtml(error.message)}</option>`; }
   finally { select.disabled = false; }
@@ -241,6 +242,7 @@ setDateMin($('#dateInput')); setDateMin($('#manageDate'));
 $('#serviceSelect').addEventListener('change', () => refreshAvailableTimes());
 $('#dateInput').addEventListener('change', () => refreshAvailableTimes());
 $('#staffSelect').addEventListener('change', () => refreshAvailableTimes());
+$('#partySizeSelect').addEventListener('change', () => refreshAvailableTimes());
 
 let pendingDeposit = null;
 $('#bookingForm').addEventListener('submit', async (event) => {
@@ -250,9 +252,10 @@ $('#bookingForm').addEventListener('submit', async (event) => {
   showMessage($('#bookingMessage'), 'Holding your selected time. Please wait...');
   try {
     const result = await api('/api/appointments', { method: 'POST', body: JSON.stringify(data) }); const appointment = result.appointment;
-    const payment = await api('/api/payments/order', { method: 'POST', body: JSON.stringify({ reference: appointment.reference }) }); pendingDeposit = payment;
+    const payment = await api('/api/payments/order', { method: 'POST', body: JSON.stringify({ reference: appointment.reference }) }); pendingDeposit = { ...payment, partySize: result.partySize || 1 };
     $('#depositCheckout').hidden = false; $('#depositAmountLabel').textContent = money(appointment.depositAmount); $('#depositModeNote').textContent = payment.mode === 'demo' ? 'Test payment only. No real money will be taken.' : 'Online payment secured by Razorpay.'; $('#payDepositButton').textContent = payment.mode === 'demo' ? 'Complete demo payment' : 'Pay advance online';
-    showMessage($('#bookingMessage'), `Your time is held for 15 minutes: ${appointment.serviceName} with ${appointment.staffName} on ${displayDate(appointment.date)} at ${displayTime(appointment.time)}. Pay the ${appointment.depositPercent}% booking advance to confirm. Reference: ${appointment.reference}.`);
+    const people = result.partySize || 1; const assignedNames = (result.appointments || []).map((person) => person.staffName).join(', '); const groupCopy = people > 1 ? ` for ${people} people, with a different team member assigned to each${assignedNames ? ` (${assignedNames})` : ''}` : ` with ${appointment.staffName}`; const references = (result.appointments || []).map((person) => person.reference).join(', ');
+    showMessage($('#bookingMessage'), `Your time is held for 15 minutes: ${appointment.serviceName}${groupCopy} on ${displayDate(appointment.date)} at ${displayTime(appointment.time)}. Pay the total ${appointment.depositPercent}% booking advance to confirm. ${people > 1 ? `Booking references: ${references}.` : `Reference: ${appointment.reference}.`}`);
     loadMyBookings().catch(()=>{});
   } catch (error) { showMessage($('#bookingMessage'), error.message, true); }
 });
@@ -261,10 +264,10 @@ $('#payDepositButton').addEventListener('click', async () => {
   try {
     if (pendingDeposit.mode === 'demo') {
       const result = await api('/api/payments/demo-confirm', { method: 'POST', body: JSON.stringify({ reference: pendingDeposit.reference }) });
-      showMessage($('#bookingMessage'), `Demo payment complete — no charge was made. Appointment ${result.reference} is confirmed.`, false); $('#depositCheckout').hidden = true; pendingDeposit = null; await loadMyBookings(); return;
+      showMessage($('#bookingMessage'), `Demo payment complete - no charge was made. ${result.partySize > 1 ? `The booking for ${result.partySize} people is` : 'Appointment'} confirmed.`); $('#depositCheckout').hidden = true; pendingDeposit = null; await loadMyBookings(); return;
     }
     if (!window.Razorpay) await new Promise((resolve, reject) => { const script = document.createElement('script'); script.src = 'https://checkout.razorpay.com/v1/checkout.js'; script.onload = resolve; script.onerror = reject; document.head.append(script); });
-    const checkout = new window.Razorpay({ key: pendingDeposit.keyId, amount: pendingDeposit.amount, currency: pendingDeposit.currency, name: pendingDeposit.name, description: pendingDeposit.description, order_id: pendingDeposit.orderId, prefill: pendingDeposit.prefill, handler: async response => { try { const confirmed = await api('/api/payments/verify', { method: 'POST', body: JSON.stringify(response) }); showMessage($('#bookingMessage'), `Booking advance received. Appointment ${confirmed.reference} is confirmed.`); $('#depositCheckout').hidden = true; pendingDeposit = null; await loadMyBookings(); } catch (error) { showMessage($('#bookingMessage'), error.message, true); } }, modal: { ondismiss: () => showMessage($('#bookingMessage'), 'Payment window closed. Your time is held for 15 minutes; you can retry the deposit.') } }); checkout.open();
+    const checkout = new window.Razorpay({ key: pendingDeposit.keyId, amount: pendingDeposit.amount, currency: pendingDeposit.currency, name: pendingDeposit.name, description: pendingDeposit.description, order_id: pendingDeposit.orderId, prefill: pendingDeposit.prefill, handler: async response => { try { const confirmed = await api('/api/payments/verify', { method: 'POST', body: JSON.stringify(response) }); showMessage($('#bookingMessage'), `Booking advance received. ${confirmed.partySize > 1 ? `Bookings for ${confirmed.partySize} people are` : 'Appointment is'} confirmed.`); $('#depositCheckout').hidden = true; pendingDeposit = null; await loadMyBookings(); } catch (error) { showMessage($('#bookingMessage'), error.message, true); } }, modal: { ondismiss: () => showMessage($('#bookingMessage'), 'Payment window closed. Your time is held for 15 minutes; you can retry the deposit.') } }); checkout.open();
   } catch (error) { showMessage($('#bookingMessage'), error.message || 'The payment page did not open. Please try again.', true); }
 });
 
@@ -278,14 +281,14 @@ $('#manageForm').addEventListener('submit', async (event) => {
     const booking = await api('/api/booking/lookup', { method: 'POST', body: JSON.stringify({ reference: data.reference.trim(), phone: data.phone.trim() }) });
     if (action === 'reschedule') {
       if (!data.date || !data.time) throw new Error('Choose a new date and available time first.');
-      const open = await api(`/api/availability?serviceId=${encodeURIComponent(booking.serviceId)}&date=${encodeURIComponent(data.date)}`);
+      const open = await api(`/api/availability?serviceId=${encodeURIComponent(booking.serviceId)}&date=${encodeURIComponent(data.date)}&partySize=${booking.partySize || 1}`);
       const slot = open.slots.find((s) => s.time === data.time);
       if (!slot) throw new Error('That time is no longer available. Choose another time.');
       const updated = await api(`/api/booking/${encodeURIComponent(booking.reference)}`, { method: 'PATCH', body: JSON.stringify({ action, phone: data.phone.trim(), date: data.date, time: data.time, staffId: slot.staff[0]?.id }) });
-      showMessage($('#manageMessage'), `Booking ${updated.reference} is now on ${displayDate(updated.date)} at ${displayTime(updated.time)} with ${updated.staffName}.`);
+      showMessage($('#manageMessage'), `Booking${updated.partySize > 1 ? ` for ${updated.partySize} people` : ''} is now on ${displayDate(updated.date)} at ${displayTime(updated.time)}${updated.staffNames?.length ? ` with ${updated.staffNames.join(', ')}` : ` with ${updated.staffName}`}.`);
     } else {
       const updated = await api(`/api/booking/${encodeURIComponent(booking.reference)}`, { method: 'PATCH', body: JSON.stringify({ action, phone: data.phone.trim() }) });
-      showMessage($('#manageMessage'), `Booking ${updated.reference} has been cancelled.`);
+      showMessage($('#manageMessage'), `Booking${updated.partySize > 1 ? ` for ${updated.partySize} people` : ''} has been cancelled.`);
     }
   } catch (error) { showMessage($('#manageMessage'), error.message, true); }
 });
@@ -295,8 +298,8 @@ $('#manageDate').addEventListener('change', async () => {
   if (!reference || !phone) { $('#manageTime').innerHTML = '<option value="">Enter reference and phone first</option>'; return; }
   try {
     const booking = await api('/api/booking/lookup', { method: 'POST', body: JSON.stringify({ reference, phone }) });
-    const data = await api(`/api/availability?serviceId=${encodeURIComponent(booking.serviceId)}&date=${encodeURIComponent($('#manageDate').value)}`);
-    $('#manageTime').innerHTML = data.slots.length ? data.slots.map((slot) => `<option value="${slot.time}">${displayTime(slot.time)}</option>`).join('') : '<option value="">No open time on this date</option>';
+    const data = await api(`/api/availability?serviceId=${encodeURIComponent(booking.serviceId)}&date=${encodeURIComponent($('#manageDate').value)}&partySize=${booking.partySize || 1}`);
+    $('#manageTime').innerHTML = data.slots.length ? data.slots.map((slot) => `<option value="${slot.time}">${displayTime(slot.time)} - ${slot.staff.length} team members available</option>`).join('') : '<option value="">No open time on this date</option>';
   } catch (error) { $('#manageTime').innerHTML = `<option value="">${escapeHtml(error.message)}</option>`; }
 });
 
@@ -476,7 +479,7 @@ function renderAppointments() {
   const filter = $('#appointmentFilter').value;
   const rows = appointmentCache.filter((a) => filter === 'all' || a.status === filter);
   $('#appointmentCount').textContent = `${rows.length} appointment${rows.length === 1 ? '' : 's'}`;
-  $('#appointmentRows').innerHTML = rows.length ? rows.map((a) => `<tr><td><strong>${escapeHtml(a.name)}</strong><small>${escapeHtml(a.phone)} · Ref ${escapeHtml(a.reference)}${a.depositAmount?`<br>Advance ${moneyFor(a.depositAmount,a.depositCurrency)} · ${escapeHtml(a.paymentStatus||'due')}`:''}${a.depositForfeited?'<br>Booking advance not refunded (customer missed visit)':''}</small></td><td>${escapeHtml(a.serviceName)}<small>${money(a.price)} · ${a.minutes} min</small></td><td>${escapeHtml(a.staffName || 'No stylist selected')}</td><td>${escapeHtml(displayDate(a.date))}<small>${escapeHtml(displayTime(a.time))}</small></td><td>${statusBadge(a.status)}</td><td><select data-appointment-status="${escapeHtml(a.id)}"><option value="confirmed" ${a.status === 'confirmed' ? 'selected' : ''}>Confirmed</option><option value="arrived" ${a.status === 'arrived' ? 'selected' : ''}>Customer arrived</option><option value="in-service" ${a.status === 'in-service' ? 'selected' : ''}>Service in progress</option><option value="completed" ${a.status === 'completed' ? 'selected' : ''}>Completed</option><option value="no-show" ${a.status === 'no-show' ? 'selected' : ''}>Did not arrive</option><option value="cancelled" ${a.status === 'cancelled' ? 'selected' : ''}>Cancelled</option></select><button class="action-button" data-download-appointment="${escapeHtml(a.id)}">Calendar file</button></td></tr>`).join('') : '<tr><td colspan="6"><p class="empty-state">No appointments match this date and filter. Try another date or filter.</p></td></tr>';
+  $('#appointmentRows').innerHTML = rows.length ? rows.map((a) => `<tr><td><strong>${escapeHtml(a.name)}</strong><small>${escapeHtml(a.phone)} · Ref ${escapeHtml(a.reference)}${a.partySize > 1 ? `<br>Group guest ${a.groupIndex} of ${a.partySize}` : ''}${a.depositAmount?`<br>Advance ${moneyFor(a.depositAmount,a.depositCurrency)} · ${escapeHtml(a.paymentStatus||'due')}`:''}${a.depositForfeited?'<br>Booking advance not refunded (customer missed visit)':''}</small></td><td>${escapeHtml(a.serviceName)}<small>${money(a.price)} · ${a.minutes} min</small></td><td>${escapeHtml(a.staffName || 'No stylist selected')}</td><td>${escapeHtml(displayDate(a.date))}<small>${escapeHtml(displayTime(a.time))}</small></td><td>${statusBadge(a.status)}</td><td><select data-appointment-status="${escapeHtml(a.id)}"><option value="confirmed" ${a.status === 'confirmed' ? 'selected' : ''}>Confirmed</option><option value="arrived" ${a.status === 'arrived' ? 'selected' : ''}>Customer arrived</option><option value="in-service" ${a.status === 'in-service' ? 'selected' : ''}>Service in progress</option><option value="completed" ${a.status === 'completed' ? 'selected' : ''}>Completed</option><option value="no-show" ${a.status === 'no-show' ? 'selected' : ''}>Did not arrive</option><option value="cancelled" ${a.status === 'cancelled' ? 'selected' : ''}>Cancelled</option></select><button class="action-button" data-download-appointment="${escapeHtml(a.id)}">Calendar file</button></td></tr>`).join('') : '<tr><td colspan="6"><p class="empty-state">No appointments match this date and filter. Try another date or filter.</p></td></tr>';
   $$('[data-appointment-status]').forEach((select) => select.addEventListener('change', async () => { try { await api(`/api/admin/appointments/${encodeURIComponent(select.dataset.appointmentStatus)}`, { method: 'PATCH', body: JSON.stringify({ status: select.value }) }); notify('Appointment status saved.'); await loadAppointments(); } catch (e) { notify(e.message, true); } }));
   $$('[data-download-appointment]').forEach((button) => button.addEventListener('click', () => { const item = rows.find((a) => a.id === button.dataset.downloadAppointment); if (item) downloadICS([item], `booking-${item.reference}.ics`); }));
 }
@@ -675,7 +678,7 @@ $('#customerVerifyButton').addEventListener('click', async () => {
 });
 $('#customerRestartButton').addEventListener('click', () => { sessionStorage.removeItem(customerChallengeKey); pendingCustomerChallengeId = ''; $('#customerVerifyPane').hidden = true; $('#customerSignupPane').hidden = false; $('#customerEmailCode').value = ''; $('#customerVerifyButton').disabled = false; $('#customerSignupButton').disabled = false; $$('[data-customer-mode]').forEach(tab=>{tab.disabled=false;}); showMessage($('#customerAuthMessage'), 'Check your details, then request a fresh email OTP.'); });
 $('#customerLogout').addEventListener('click',()=>{sessionStorage.removeItem('salonCustomerToken');sessionStorage.removeItem(customerChallengeKey);pendingCustomerChallengeId='';$('#customerSessionPanel').hidden=true;$('#customerAuthPanel').hidden=false;$('#customerVerifyPane').hidden=true;$('#customerSignupPane').hidden=true;$('#customerLoginPane').hidden=false;$$('[data-customer-mode]').forEach(tab=>{tab.disabled=false;tab.classList.toggle('active',tab.dataset.customerMode==='login');});customerAuthMode='login';$('#myBookings').innerHTML='';$('#bookingForm').elements.name.value='';$('#bookingForm').elements.phone.value='';showMessage($('#customerAuthMessage'),'You have signed out.');});
-async function loadMyBookings(){if(!sessionStorage.getItem('salonCustomerToken'))return;const bookings=await api('/api/customer/bookings');$('#myBookings').innerHTML=bookings.length?`<span class="eyebrow">YOUR BOOKINGS</span>`+bookings.map(b=>`<article class="my-booking-row"><div><strong>${escapeHtml(b.salonName)} · ${escapeHtml(b.branchName)}</strong><small>${escapeHtml(b.serviceName)} with ${escapeHtml(b.staffName)}</small><small>${escapeHtml(displayDate(b.date))} · ${escapeHtml(displayTime(b.time))} · ${escapeHtml(statusLabel(b.status))}</small></div><small>${b.depositForfeited?'Advance not refunded (missed appointment)':b.paymentStatus==='deposit_due'?'Advance payment due':b.depositAmount?`Advance: ${moneyFor(b.depositAmount,b.depositCurrency)}`:'No advance paid'}</small>${b.status==='completed'?`<button class="text-button" data-rate-reference="${escapeHtml(b.reference)}" data-salon-slug="${escapeHtml(b.salonSlug)}" data-branch-id="${escapeHtml(b.branchId)}">Rate visit</button>`:''}</article>`).join(''):'<p class="empty-state">Your salon bookings will appear here.</p>';
+async function loadMyBookings(){if(!sessionStorage.getItem('salonCustomerToken'))return;const bookings=await api('/api/customer/bookings');$('#myBookings').innerHTML=bookings.length?`<span class="eyebrow">YOUR BOOKINGS</span>`+bookings.map(b=>`<article class="my-booking-row"><div><strong>${escapeHtml(b.salonName)} · ${escapeHtml(b.branchName)}</strong><small>${escapeHtml(b.serviceName)} with ${escapeHtml(b.staffName)}${b.partySize > 1 ? ` - Person ${b.groupIndex} of ${b.partySize}` : ''}</small><small>${escapeHtml(displayDate(b.date))} · ${escapeHtml(displayTime(b.time))} · ${escapeHtml(statusLabel(b.status))}</small></div><small>${b.depositForfeited?'Advance not refunded (missed appointment)':b.paymentStatus==='deposit_due'?'Advance payment due':b.depositAmount?`Advance: ${moneyFor(b.depositAmount,b.depositCurrency)}`:'No advance paid'}</small>${b.status==='completed'?`<button class="text-button" data-rate-reference="${escapeHtml(b.reference)}" data-salon-slug="${escapeHtml(b.salonSlug)}" data-branch-id="${escapeHtml(b.branchId)}">Rate visit</button>`:''}</article>`).join(''):'<p class="empty-state">Your salon bookings will appear here.</p>';
   $$('[data-rate-reference]').forEach(button=>button.addEventListener('click',async()=>{const rating=Number(prompt('Rate your visit: enter a whole number from 1 to 5 stars'));if(!Number.isInteger(rating)||rating<1||rating>5)return;const comment=prompt('Share a short review (optional)')||'';const previous={salon:publicContext.salon,branch:publicContext.branch};publicContext.salon=button.dataset.salonSlug;publicContext.branch=button.dataset.branchId;try{await api('/api/reviews',{method:'POST',body:JSON.stringify({reference:button.dataset.rateReference,rating,comment})});notify('Thanks for reviewing this salon.');await loadMyBookings();}catch(error){notify(error.message,true);}finally{publicContext=previous;}}));}
 restoreCustomerSession();
 renderRoute();

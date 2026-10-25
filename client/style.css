@@ -188,3 +188,5 @@ a,button,input,select,textarea{-webkit-tap-highlight-color:transparent}
 .password-visibility-toggle:hover{background:#edf1e8;color:var(--green)}
 .password-visibility-toggle:focus-visible{outline:3px solid #9bb96d;outline-offset:1px}
 .password-visibility-toggle svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+.group-booking-help{display:block;margin-top:.25rem;color:#737970;font-size:.75rem;line-height:1.45}
