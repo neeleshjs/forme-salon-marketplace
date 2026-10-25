@@ -368,6 +368,14 @@ async function loadPartnerCategories() {
 
 function openAdmin(create = false) { $('#adminShell').hidden = false; document.body.style.overflow = 'hidden'; addingOrganization = Boolean(create && sessionStorage.getItem(tokenKey)); ensurePartnerCategoryFields(); setAuthMode(create ? 'register' : 'login'); const categorySelect = $('#partnerBusinessCategory'); if (categorySelect) categorySelect.required = authMode === 'register'; renderPartnerSubcategories(); if (create) loadPartnerCategories().catch((error) => showMessage($('#adminMessage'), error.message, true)); if (sessionStorage.getItem(tokenKey) && !addingOrganization) resumeSession(); }
 function closeAdmin() { document.body.style.overflow = ''; navigate('/'); }
+function updatePartnerAuthTabs(mode = authMode) {
+  const creating = mode === 'register';
+  const loginTab = $('#partnerLoginTab'); const signupTab = $('#partnerSignupTab'); const tabs = $('#partnerAuthTabs');
+  if (!loginTab || !signupTab || !tabs) return;
+  loginTab.classList.toggle('active', !creating); signupTab.classList.toggle('active', creating);
+  loginTab.setAttribute('aria-pressed', String(!creating)); signupTab.setAttribute('aria-pressed', String(creating));
+  tabs.hidden = addingOrganization || Boolean(pendingPartnerChallengeId);
+}
 function setAuthMode(mode) {
   authMode = mode;
   pendingPartnerChallengeId = '';
@@ -379,26 +387,26 @@ function setAuthMode(mode) {
   $('#authSubmit').hidden = false;
 
   const creating = mode === 'register';
+  updatePartnerAuthTabs(mode);
   $('#authEyebrow').textContent = addingOrganization ? 'ADD A SALON WORKSPACE' : creating ? 'SALON OWNER SIGNUP' : 'FORME PARTNER PORTAL';
-  $('#authTitle').textContent = addingOrganization ? 'Add another salon.' : creating ? 'Create your salon account.' : 'Welcome back.';
+  $('#authTitle').textContent = addingOrganization ? 'Add another salon.' : creating ? 'Create your partner account.' : 'Welcome back.';
   $('#authIntro').textContent = addingOrganization
     ? 'Add another salon and its first location to your owner account.'
     : creating
-      ? 'Use an email you can open. We will send a 6-digit verification code there. Your mobile number is for salon contact.'
-      : 'Sign in with your registered email and password. OTP is only needed to verify a new account or reset your password.';
+      ? 'Use an email you can access. We will send a 6-digit code to verify it. Your mobile number is for salon contact.'
+      : 'Sign in to manage your salon, team and bookings.';
   $('#authCreateFields').hidden = !creating;
   $('#ownerNameLabel').hidden = addingOrganization;
   $('#partnerPhoneLabel').hidden = addingOrganization;
   $('#adminLogin').querySelector('[name="name"]').required = creating && !addingOrganization;
   $('#adminLogin').querySelector('[name="phone"]').required = creating && !addingOrganization;
-  $('#authToggle').hidden = addingOrganization;
   $('#adminLogin [name="email"]').required = !addingOrganization;
   $('#adminLogin [name="password"]').required = !addingOrganization;
   $('#adminLogin [name="password"]').minLength = addingOrganization ? 0 : 8;
+  $('#adminLogin [name="password"]').autocomplete = creating ? 'new-password' : 'current-password';
   $('#adminLogin [name="email"]').closest('label').hidden = addingOrganization;
   $('#adminLogin [name="password"]').closest('label').hidden = addingOrganization;
-  $('#authToggle').textContent = creating ? 'Already have an account? Sign in' : 'New to FORME? Create a salon account';
-  $('#authSubmit').textContent = addingOrganization ? 'Add another salon' : creating ? 'Create partner account' : 'Sign in to dashboard';
+  $('#authSubmit').textContent = addingOrganization ? 'Add another salon' : creating ? 'Create account' : 'Sign in';
   $('#workspaceChooser').hidden = true;
   $('#adminLogin').querySelector('[name="country"]').required = creating;
   $('#adminLogin').querySelector('[name="timeZone"]').required = creating;
@@ -414,11 +422,12 @@ function renderWorkspaceSelectors() { const org=$('#orgSelector'), branch=$('#br
 async function changeWorkspace(tenantId, branchId) { const org=organizations.find(o=>o.id===tenantId); const branch=(org?.branches||[]).find(b=>b.id===branchId); if(!branch)return; try { const result=await api('/api/auth/switch-context',{method:'POST',body:JSON.stringify({tenantId,branchId})}); sessionStorage.setItem(tokenKey,result.sessionToken); activeWorkspace=result.workspace; await resumeSession(); notify(`Switched to ${branch.name}.`); } catch(e){ notify(e.message,true); renderWorkspaceSelectors(); } }
 
 $('#adminClose').addEventListener('click', closeAdmin); $('#adminShell').addEventListener('click', (e) => { if (e.target === $('#adminShell')) closeAdmin(); });
-$('#authToggle').addEventListener('click', () => navigate(authMode === 'login' ? '/partner/signup' : '/partner/login'));
+$('#partnerLoginTab').addEventListener('click', () => { if (authMode !== 'login' && !addingOrganization) navigate('/partner/login'); });
+$('#partnerSignupTab').addEventListener('click', () => { if (authMode !== 'register' && !addingOrganization) navigate('/partner/signup'); });
 $('#partnerForgotPasswordButton').addEventListener('click', () => {
   pendingPartnerResetChallengeId = ''; sessionStorage.removeItem(partnerResetChallengeKey);
   const email = $('#adminLogin [name="email"]').value.trim(); if (email) $('#partnerResetEmail').value = email;
-  $('#adminLogin').hidden = true; $('#authToggle').hidden = true; $('#workspaceChooser').hidden = true; $('#partnerPasswordResetPanel').hidden = false;
+  $('#adminLogin').hidden = true; $('#partnerAuthTabs').hidden = true; $('#workspaceChooser').hidden = true; $('#partnerPasswordResetPanel').hidden = false;
   $('#partnerResetRequestPane').hidden = false; $('#partnerResetCompletePane').hidden = true; $('#authEyebrow').textContent = 'ACCOUNT RECOVERY'; $('#authTitle').textContent = 'Reset your password.'; $('#authIntro').textContent = 'Enter the email you use to sign in. We will send a 6-digit code if an account matches.'; showMessage($('#partnerResetMessage'), '');
 });
 $('#partnerResetRequestButton').addEventListener('click', async () => {
@@ -461,7 +470,7 @@ $('#adminLogin').addEventListener('submit', async (event) => {
       const challenge = await api('/api/auth/register', { method: 'POST', body: JSON.stringify(payload) });
       pendingPartnerChallengeId = challenge.challengeId; $('#partnerOtpDestinations').textContent = challenge.emailHint;
       sessionStorage.setItem(partnerChallengeKey, JSON.stringify({ challengeId: challenge.challengeId, emailHint: challenge.emailHint, expiresAt: Date.now() + challenge.expiresInSeconds * 1000 }));
-      $('#authCreateFields').hidden = true; $('#authSubmit').hidden = true; $('#authToggle').hidden = true; $('#partnerVerifyPanel').hidden = false;
+      $('#authCreateFields').hidden = true; $('#authSubmit').hidden = true; updatePartnerAuthTabs(); $('#partnerVerifyPanel').hidden = false;
       showMessage($('#adminMessage'), 'Email OTP sent. Enter it to verify your owner account.'); return;
     }
     const result = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: payload.email, password: payload.password }) });
@@ -474,7 +483,7 @@ $('#adminLogin').addEventListener('submit', async (event) => {
       $('#workspaceChoice').innerHTML = choices.map((choice, index) => `<option value="${index}">${escapeHtml(choice.label)}</option>`).join('');
       $('#workspaceChoice').dataset.choices = JSON.stringify(choices);
       $('#adminLogin').hidden = true;
-      $('#authToggle').hidden = true;
+      $('#partnerAuthTabs').hidden = true;
       $('#authEyebrow').textContent = 'SELECT A WORKSPACE';
       $('#authTitle').textContent = 'Choose a salon';
       $('#authIntro').textContent = 'Select the salon and location you want to manage.';
@@ -493,7 +502,7 @@ $('#partnerVerifyButton').addEventListener('click', async () => {
     sessionStorage.removeItem(partnerChallengeKey); sessionStorage.setItem(tokenKey, result.sessionToken); activeUser = result.user; activeWorkspace = result.workspace; organizations = result.organizations; pendingPartnerChallengeId = ''; await finishWorkspace();
   } catch (error) { $('#partnerVerifyButton').disabled = false; showMessage($('#adminMessage'), error.message, true); }
 });
-$('#partnerRestartButton').addEventListener('click', () => { sessionStorage.removeItem(partnerChallengeKey); pendingPartnerChallengeId = ''; $('#partnerVerifyPanel').hidden = true; $('#authCreateFields').hidden = false; $('#authSubmit').hidden = false; $('#authToggle').hidden = false; $('#partnerEmailCode').value = ''; $('#partnerVerifyButton').disabled = false; showMessage($('#adminMessage'), 'Check your details, then request a fresh email OTP.'); });
+$('#partnerRestartButton').addEventListener('click', () => { sessionStorage.removeItem(partnerChallengeKey); pendingPartnerChallengeId = ''; $('#partnerVerifyPanel').hidden = true; $('#authCreateFields').hidden = false; $('#authSubmit').hidden = false; updatePartnerAuthTabs(); $('#partnerEmailCode').value = ''; $('#partnerVerifyButton').disabled = false; showMessage($('#adminMessage'), 'Check your details, then request a fresh email OTP.'); });
 $('#workspaceContinue').addEventListener('click', async () => {
   const button = $('#workspaceContinue');
   button.disabled = true;
@@ -829,7 +838,7 @@ function restoreRegistrationChallenges() {
   try {
     const partnerReset = JSON.parse(sessionStorage.getItem(partnerResetChallengeKey) || 'null');
     if (partnerReset && partnerReset.expiresAt > Date.now() && route.name === 'partner-login') {
-      pendingPartnerResetChallengeId = partnerReset.challengeId; $('#partnerResetEmail').value = partnerReset.email || ''; $('#adminLogin').hidden = true; $('#authToggle').hidden = true; $('#workspaceChooser').hidden = true; $('#partnerPasswordResetPanel').hidden = false; $('#partnerResetRequestPane').hidden = true; $('#partnerResetCompletePane').hidden = false; $('#authEyebrow').textContent = 'ACCOUNT RECOVERY'; $('#authTitle').textContent = 'Reset your password.'; $('#authIntro').textContent = 'Enter the email you use to sign in. We will send a 6-digit code if an account matches.'; showMessage($('#partnerResetMessage'), 'Enter the code from your email to continue.');
+      pendingPartnerResetChallengeId = partnerReset.challengeId; $('#partnerResetEmail').value = partnerReset.email || ''; $('#adminLogin').hidden = true; $('#partnerAuthTabs').hidden = true; $('#workspaceChooser').hidden = true; $('#partnerPasswordResetPanel').hidden = false; $('#partnerResetRequestPane').hidden = true; $('#partnerResetCompletePane').hidden = false; $('#authEyebrow').textContent = 'ACCOUNT RECOVERY'; $('#authTitle').textContent = 'Reset your password.'; $('#authIntro').textContent = 'Enter the email you use to sign in. We will send a 6-digit code if an account matches.'; showMessage($('#partnerResetMessage'), 'Enter the code from your email to continue.');
     } else if (partnerReset && partnerReset.expiresAt <= Date.now()) sessionStorage.removeItem(partnerResetChallengeKey);
     const customerReset = JSON.parse(sessionStorage.getItem(customerResetChallengeKey) || 'null');
     if (customerReset && customerReset.expiresAt > Date.now() && ['home', 'account', 'booking', 'salon'].includes(route.name)) {
@@ -837,7 +846,7 @@ function restoreRegistrationChallenges() {
     } else if (customerReset && customerReset.expiresAt <= Date.now()) sessionStorage.removeItem(customerResetChallengeKey);
     const partner = JSON.parse(sessionStorage.getItem(partnerChallengeKey) || 'null');
     if (partner && partner.expiresAt > Date.now() && route.name === 'partner-signup') {
-      pendingPartnerChallengeId = partner.challengeId; $('#partnerOtpDestinations').textContent = `${partner.emailHint}`; $('#authCreateFields').hidden = true; $('#authSubmit').hidden = true; $('#authToggle').hidden = true; $('#partnerVerifyPanel').hidden = false; showMessage($('#adminMessage'), 'Enter the email OTP to finish setting up your salon account.');
+      pendingPartnerChallengeId = partner.challengeId; $('#partnerOtpDestinations').textContent = `${partner.emailHint}`; $('#authCreateFields').hidden = true; $('#authSubmit').hidden = true; updatePartnerAuthTabs(); $('#partnerVerifyPanel').hidden = false; showMessage($('#adminMessage'), 'Enter the email OTP to finish setting up your salon account.');
     } else if (partner && partner.expiresAt <= Date.now()) sessionStorage.removeItem(partnerChallengeKey);
     const customer = JSON.parse(sessionStorage.getItem(customerChallengeKey) || 'null');
     if (customer && customer.expiresAt > Date.now() && ['account', 'booking'].includes(route.name)) {

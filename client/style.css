@@ -442,3 +442,52 @@ body[data-page="partner-signup"] .admin-shell{background:#f3f2ec;backdrop-filter
   #printReceipt .salon-receipt,#printReceipt .receipt-meta,#printReceipt .receipt-totals,#printReceipt .receipt-payment{break-inside:avoid;page-break-inside:avoid}
 }
 .listing-review-banner{display:flex;gap:12px;align-items:flex-start;padding:13px 16px;margin:0 0 16px;border:1px solid #ead6b4;border-radius:12px;background:#fff7e9;color:#80571e;font-size:12px;line-height:1.55}.listing-review-banner[hidden]{display:none}.listing-review-banner strong{flex:none;font-size:10px;letter-spacing:.09em;color:#94601a}.listing-review-banner b{font-weight:700}
+
+/* Partner sign-in follows the same simple card and tabs as customer sign-in. */
+body[data-page="partner-login"] .admin-shell,body[data-page="partner-signup"] .admin-shell{background:var(--paper);backdrop-filter:none}
+.admin-gate#adminGate{width:min(100%,720px);min-height:100svh;margin-inline:auto;padding:clamp(20px,4vh,42px) clamp(14px,3vw,28px);grid-template-columns:minmax(0,1fr);gap:0;place-items:center}
+.partner-auth-layout{display:grid;width:min(100%,620px);gap:18px;margin:auto}
+.partner-auth-top{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.partner-auth-brand{gap:10px}
+.partner-auth-brand .brand-mark{width:38px;height:38px}
+.partner-auth-brand .brand-sub{color:#81867c}
+.partner-auth-back{min-height:40px;padding:8px 10px;border:0;border-radius:8px;background:transparent;color:#687064;font-size:.8rem;cursor:pointer}
+.partner-auth-back:hover{background:#ebece5;color:var(--ink)}
+.partner-auth-card.customer-access{width:100%;padding:clamp(18px,3.5vw,30px);border-radius:15px;box-shadow:0 10px 30px #17211c08}
+.partner-auth-card .customer-auth-head{align-items:flex-start;margin-bottom:14px}
+.partner-auth-card .customer-auth-head h3{max-width:340px;margin:.4rem 0 0;font-size:clamp(1.35rem,3vw,1.65rem);line-height:1.2;letter-spacing:-.02em}
+.partner-auth-card .eyebrow{color:#727d68}
+.partner-auth-tabs{flex:0 0 auto}
+.partner-auth-card .auth-tabs button{min-height:38px;padding:.55rem .85rem;font-size:.78rem}
+.partner-auth-intro{margin:0 0 16px}
+.partner-auth-fields{gap:12px}
+.partner-auth-fields label{gap:6px;color:#424b40;font-size:.85rem;font-weight:600;letter-spacing:0}
+.partner-auth-fields input,.partner-auth-fields select{width:100%;min-height:47px;padding:0 12px;border:1px solid #ddd8ce;border-radius:8px;background:#fff;color:var(--ink);font:inherit;outline:0;transition:border-color .18s,box-shadow .18s}
+.partner-auth-fields input:focus,.partner-auth-fields select:focus{border-color:#73845e;box-shadow:0 0 0 3px #73845e20}
+.partner-auth-fields input::placeholder{color:#999f94}
+.partner-auth-fields .button{min-height:48px;border-radius:8px}
+.partner-auth-card #partnerForgotPasswordButton{justify-self:start;width:max-content;margin:-6px 0 0;padding:2px 0;color:#59684e;font-size:.78rem;text-align:left;text-decoration:underline;text-underline-offset:3px}
+.partner-auth-card #partnerForgotPasswordButton:hover{color:#34462e}
+.partner-auth-card .auth-create-fields{gap:12px}
+.partner-auth-card .auth-create-fields>.form-help{margin:0}
+.partner-form-section{padding-top:5px;border-top:1px solid #eceae4;color:#7b8477;font-size:.66rem;font-weight:700;letter-spacing:.12em}
+.partner-auth-card .field-help{color:#7a8177;font-size:.72rem;font-weight:400;line-height:1.4}
+.partner-auth-card .form-message{min-height:0;margin:0;font-size:.8rem}
+.partner-auth-card .form-message:not(:empty){margin-top:2px}
+.partner-auth-card .auth-toggle:not(#partnerForgotPasswordButton){margin:4px 0 0;padding:8px 0 0;border-top:1px solid #eceae4;color:#59684e;font-size:.78rem;text-decoration:underline;text-underline-offset:3px}
+.partner-auth-customer-link{margin:0;color:#73796f;font-size:.8rem;text-align:center}
+.partner-auth-customer-link a{color:#40563d;font-weight:600;text-decoration:underline;text-underline-offset:3px}
+@media(max-width:560px){
+  .admin-gate#adminGate{align-content:start;padding:max(16px,env(safe-area-inset-top)) 12px max(22px,env(safe-area-inset-bottom))}
+  .partner-auth-layout{gap:14px}
+  .partner-auth-top{gap:8px}
+  .partner-auth-brand{gap:8px;font-size:12px}
+  .partner-auth-brand .brand-mark{width:34px;height:34px;font-size:20px}
+  .partner-auth-back{min-height:40px;padding:7px 8px;font-size:.72rem}
+  .partner-auth-card.customer-access{padding:18px 16px}
+  .partner-auth-card .customer-auth-head{flex-direction:column;gap:12px}
+  .partner-auth-card .customer-auth-head h3{max-width:none;font-size:1.4rem}
+  .partner-auth-tabs{width:100%}
+  .partner-auth-card .auth-tabs button{flex:1}
+  .partner-auth-card .form-row{grid-template-columns:1fr;gap:12px}
+}
