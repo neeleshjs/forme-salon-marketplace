@@ -178,6 +178,7 @@ export function registerPlatformAdminRoutes(app, { databasePool, ensureDatabase,
   router.post('/login', async (req, res, next) => {
     try {
       const email = normEmail(req.body?.email); const password = String(req.body?.password || '');
+      if (email.length > 254 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 12 || password.length > 128) return res.status(401).json({ error: 'Email, password, or authenticator code is incorrect.' });
       await query("DELETE FROM platform_admin_login_attempts WHERE attempted_at<NOW()-INTERVAL '30 days'");
       const attempts = await query(`SELECT COUNT(*)::int AS count FROM platform_admin_login_attempts WHERE email=$1 AND attempted_at>NOW()-INTERVAL '15 minutes'`, [email]);
       if (attempts.rows[0].count >= 8) return res.status(429).json({ error: 'Too many admin sign-in attempts. Try again in 15 minutes.' });
@@ -337,6 +338,7 @@ export function registerPlatformAdminRoutes(app, { databasePool, ensureDatabase,
       if (active !== undefined && typeof active !== 'boolean' || role !== undefined && !ROLES.has(role)) return res.status(400).json({ error: 'Choose a valid active setting or admin role.' });
       if (req.params.id === req.platformAdmin.id && active === false) return res.status(400).json({ error: 'You cannot deactivate your own account.' });
       return await transact(async (client) => {
+        await client.query('SELECT pg_advisory_xact_lock($1)', [784215904]);
         const current = (await client.query('SELECT * FROM platform_admin_users WHERE id=$1 FOR UPDATE', [req.params.id])).rows[0]; if (!current) return res.status(404).json({ error: 'Admin not found.' });
         const nextRole = role || current.role; const nextActive = active === undefined ? current.active : active;
         if (current.role === 'owner' && current.active && (nextRole !== 'owner' || !nextActive)) { const owners = await client.query("SELECT COUNT(*)::int AS n FROM platform_admin_users WHERE role='owner' AND active=TRUE"); if (owners.rows[0].n <= 1) return res.status(409).json({ error: 'Keep at least one active platform owner.' }); }
