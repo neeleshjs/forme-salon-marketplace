@@ -453,12 +453,6 @@ async function startRegistrationVerification(platform, { purpose, email, phone, 
   const recent = platform.otpSendHistory.filter((item) => item.flow !== 'password-reset' && (item.email === email || item.phone === phone));
   const latestAttemptAt = recent.reduce((latest, item) => Math.max(latest, Number(item.createdAt) || 0), 0);
   if (latestAttemptAt && now - latestAttemptAt < 60 * 1000) return { status: 429, error: 'Please wait one minute before requesting another code.' };
-  const delivered = recent.filter((item) => item.delivered === true);
-  const retryMinutes = (items) => Math.max(1, Math.ceil((Math.min(...items.map((item) => Number(item.createdAt) || now)) + 60 * 60 * 1000 - now) / 60000));
-  if (delivered.length >= 3) return { status: 429, error: `For your security, only 3 verification codes can be sent per hour. Try again in about ${retryMinutes(delivered)} minute(s).` };
-  // Legacy entries without a delivery status count as attempts, not as successfully sent codes.
-  // This lets users retry after provider failures while keeping a stricter hourly attempt cap.
-  if (recent.length >= 5) return { status: 429, error: `Too many signup attempts. Please try again in about ${retryMinutes(recent)} minute(s).` };
   const challengeId = randomUUID(); const emailCode = String(randomInt(100000, 1000000));
   platform.registrationChallenges = platform.registrationChallenges.filter((item) => !(item.purpose === purpose && item.email === email) && item.expiresAt > now);
   const challengeRecord = { id: challengeId, purpose, email, phone, emailOtpHash: hashOtp(challengeId, 'email', emailCode).toString('hex'), registration, attempts: 0, expiresAt: now + 10 * 60 * 1000, createdAt: now };
@@ -496,7 +490,7 @@ async function startPasswordReset(platform, { accountType, email }) {
   const activeChallenge = platform.passwordResetChallenges.find((item) => item.purpose === purpose && item.email === email);
   const recent = platform.otpSendHistory.filter((item) => item.email === email && item.flow === 'password-reset');
   const coolingDown = recent.some((item) => now - item.createdAt < 60 * 1000);
-  const rateLimited = coolingDown || recent.length >= 3;
+  const rateLimited = coolingDown;
   if (rateLimited && activeChallenge) return { status: 202, challengeId: activeChallenge.id };
 
   const challengeId = randomUUID(); const code = String(randomInt(100000, 1000000));
