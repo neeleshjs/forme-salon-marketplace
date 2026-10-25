@@ -614,26 +614,82 @@ async function loadCustomers() {
   $$('[data-customer-notes]').forEach((button) => button.addEventListener('click', async () => { const customer = customers.find((c) => c.id === button.dataset.customerNotes); const notes = prompt(`Staff-only note about ${customer.name}:`, customer.notes || ''); if (notes === null) return; try { await api(`/api/admin/customers/${encodeURIComponent(customer.id)}`, { method: 'PATCH', body: JSON.stringify({ notes }) }); notify('Customer note saved.'); await loadCustomers(); } catch (e) { notify(e.message, true); } }));
 }
 
+function productStockStatus(product) {
+  const stock = Number(product.stock) || 0; const reorderAt = Number(product.lowStockAt) || 0;
+  if (stock <= 0) return { key: 'out', label: 'Out of stock', className: 'out' };
+  if (stock <= reorderAt) return { key: 'low', label: 'Needs reorder', className: 'low' };
+  return { key: 'available', label: 'In stock', className: 'available' };
+}
+function productStockMarkup(product) {
+  const stock = Number(product.stock) || 0; const reorderAt = Number(product.lowStockAt) || 0; const status = productStockStatus(product);
+  const width = reorderAt > 0 ? Math.min(100, Math.round(stock / reorderAt * 100)) : (stock > 0 ? 100 : 0);
+  return `<span class="stock-status-pill ${status.className}">${status.label}</span><div class="stock-level-line"><div class="stock-bar ${status.className}"><span style="width:${width}%"></span></div><small>Alert at ${reorderAt} units</small></div>`;
+}
+function renderInventoryProducts() {
+  const products = adminData.products;
+  const query = ($('#inventorySearch').value || '').trim().toLocaleLowerCase('en-IN');
+  const filter = $('#inventoryFilter').value;
+  const filtered = products.filter((product) => {
+    const status = productStockStatus(product).key;
+    const matchesFilter = filter === 'all' || (filter === 'low' && status !== 'available') || status === filter;
+    const searchable = `${product.name || ''} ${product.category || ''} ${product.sku || ''}`.toLocaleLowerCase('en-IN');
+    return matchesFilter && (!query || searchable.includes(query));
+  });
+  $('#inventoryResultCount').textContent = `Showing ${filtered.length} of ${products.length} ${products.length === 1 ? 'product' : 'products'}`;
+  if (!filtered.length) {
+    const message = products.length ? 'No products match this search or stock filter.' : 'No products added yet. Add your first product to start tracking stock.';
+    $('#productRows').innerHTML = `<tr><td colspan="7"><p class="empty-state">${message}</p></td></tr>`;
+    $('#productCards').innerHTML = `<div class="inventory-empty"><span class="inventory-empty-icon">▤</span><strong>${message}</strong>${products.length ? '' : '<button class="button button-dark" data-open-product type="button">+ Add your first product</button>'}</div>`;
+    return;
+  }
+  $('#productRows').innerHTML = filtered.map((p) => `<tr><td><strong>${escapeHtml(p.name)}</strong></td><td>${escapeHtml(p.category || 'General')}</td><td>${escapeHtml(p.sku || '—')}</td><td>${money(p.price)}</td><td><strong class="inventory-quantity">${Number(p.stock) || 0}</strong></td><td>${productStockMarkup(p)}</td><td><button class="action-button" data-receive-stock="${escapeHtml(p.id)}">Receive stock</button></td></tr>`).join('');
+  $('#productCards').innerHTML = filtered.map((p) => `<article class="inventory-product-card"><div class="inventory-product-card-head"><div><span class="eyebrow">${escapeHtml(p.category || 'General')}</span><h3>${escapeHtml(p.name)}</h3></div><strong class="inventory-card-price">${money(p.price)}</strong></div><div class="inventory-card-meta"><span>${p.sku ? `Code: ${escapeHtml(p.sku)}` : 'No product code'}</span><span><strong>${Number(p.stock) || 0}</strong> units on hand</span></div><div class="inventory-card-stock">${productStockMarkup(p)}</div><button class="button button-outline" data-receive-stock="${escapeHtml(p.id)}" type="button">+ Receive stock</button></article>`).join('');
+  $$('[data-receive-stock]').forEach((button) => button.addEventListener('click', () => openReceiveDialog(button.dataset.receiveStock)));
+}
+function openProductDialog() {
+  const form = $('#productForm'); form.reset(); showMessage($('#productMessage'), ''); $('#productDialog').showModal(); form.elements.name.focus();
+}
+function openReceiveDialog(productId) {
+  const product = adminData.products.find((item) => item.id === productId); if (!product) return;
+  const form = $('#receiveForm'); form.reset(); form.elements.productId.value = product.id; form.elements.quantity.value = 1;
+  $('#receiveProductName').textContent = product.name; $('#receiveProductStock').textContent = Number(product.stock) || 0; showMessage($('#receiveMessage'), '');
+  $('#receiveDialog').showModal(); form.elements.quantity.focus();
+}
 async function loadInventory() {
   const [products, movements, purchases] = await Promise.all([api('/api/admin/products'), api('/api/admin/movements'), api('/api/admin/purchases')]);
   adminData.products = products;
-  const stockValue = products.reduce((n, p) => n + p.stock * p.price, 0); const alerts = products.filter((p) => p.stock <= p.lowStockAt).length;
-  $('#inventoryMetrics').innerHTML = metric('Products', products.length, 'Retail items tracked') + metric('Stock retail value', money(stockValue), 'On-hand retail value') + metric('Low stock', alerts, 'At or below reorder level') + metric('Stock movements', movements.length, 'Receipts and sales');
-  $('#purchaseProduct').innerHTML = products.filter((p) => p.active).map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} · ${p.stock} in stock</option>`).join('');
-  $('#productRows').innerHTML = products.map((p) => `<tr><td><strong>${escapeHtml(p.name)}</strong></td><td>${escapeHtml(p.category)}</td><td>${escapeHtml(p.sku || '—')}</td><td>${money(p.price)}</td><td><strong>${p.stock}</strong></td><td><div class="stock-bar ${p.stock <= p.lowStockAt ? 'low' : ''}"><span style="width:${Math.min(100, Math.max(8, p.stock * 8))}%"></span></div><small>Reorder at ${p.lowStockAt}</small></td><td><button class="action-button" data-receive-stock="${escapeHtml(p.id)}">Receive stock</button></td></tr>`).join('');
-  $('#movementRows').innerHTML = movements.length ? movements.map((m) => `<div class="movement-row"><span><strong>${escapeHtml(m.productName)}</strong><small>${escapeHtml(m.note)} · ${new Date(m.createdAt).toLocaleString()}</small></span><span class="movement-quantity ${m.quantity < 0 ? 'negative' : ''}">${m.quantity > 0 ? '+' : ''}${m.quantity}</span><span>${escapeHtml(m.type)}</span></div>`).join('') : '<p class="empty-state">Stock activity will appear here.</p>';
-  $('#purchaseRows').innerHTML = purchases.length ? purchases.map((p) => `<tr><td><strong>${escapeHtml(p.reference)}</strong></td><td>${escapeHtml(p.supplier)}</td><td>${escapeHtml(p.productName)}</td><td>${p.quantity}</td><td>${money(p.total)}</td><td>${statusBadge(p.status)}</td><td>${p.status === 'ordered' ? `<button class="action-button" data-receive-purchase="${escapeHtml(p.id)}">Receive items</button>` : 'Stock received'}</td></tr>`).join('') : '<tr><td colspan="7"><p class="empty-state">Create a supplier order; receive it to increase stock.</p></td></tr>';
-  $$('[data-receive-stock]').forEach((button) => button.addEventListener('click', async () => { const raw = prompt('How many units did you receive? Enter a whole number.'); if (raw === null) return; const quantity = Number(raw); try { await api(`/api/admin/products/${encodeURIComponent(button.dataset.receiveStock)}/receive`, { method: 'POST', body: JSON.stringify({ quantity, note: 'Supplier delivery' }) }); notify('New stock added.'); await loadInventory(); } catch (e) { notify(e.message, true); } }));
-  $$('[data-receive-purchase]').forEach((button) => button.addEventListener('click', async () => { try { await api(`/api/admin/purchases/${encodeURIComponent(button.dataset.receivePurchase)}/receive`, { method: 'PATCH', body: '{}' }); notify('Delivery received and stock updated.'); await loadInventory(); } catch (e) { notify(e.message, true); } }));
+  const stockValue = products.reduce((n, p) => n + (Number(p.stock) || 0) * (Number(p.price) || 0), 0);
+  const alerts = products.filter((p) => (Number(p.stock) || 0) <= (Number(p.lowStockAt) || 0)).length;
+  $('#inventoryMetrics').innerHTML = metric('Products', products.length, 'Retail items in this salon') + metric('Retail stock value', money(stockValue), 'Uses listed selling prices') + metric('Needs reorder', alerts, 'Includes products at zero') + metric('Stock updates', movements.length, 'Sales, deliveries and opening stock');
+  const activeProducts = products.filter((p) => p.active);
+  $('#purchaseProduct').innerHTML = activeProducts.length ? '<option value="" disabled selected>Choose a product</option>' + activeProducts.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} · ${Number(p.stock) || 0} in stock</option>`).join('') : '<option value="">Add a product first</option>';
+  $('#purchaseSubmit').disabled = activeProducts.length === 0;
+  renderInventoryProducts();
+  $('#movementRows').innerHTML = movements.length ? movements.slice(0, 20).map((m) => { const movementLabels = { initial: 'Opening stock', received: 'Stock received', purchase: 'Supplier delivery', sold: 'Sale' }; return `<div class="movement-row"><span><strong>${escapeHtml(m.productName)}</strong><small>${escapeHtml(m.note || 'Stock updated')} · ${new Date(m.createdAt).toLocaleString()}</small></span><span class="movement-quantity ${m.quantity < 0 ? 'negative' : ''}">${m.quantity > 0 ? '+' : ''}${Number(m.quantity) || 0}</span><span class="movement-type">${movementLabels[m.type] || escapeHtml(m.type)}</span></div>`; }).join('') : '<p class="empty-state">Stock activity will appear here after a product is added or sold.</p>';
+  $('#purchaseRows').innerHTML = purchases.length ? purchases.map((p) => `<tr><td><strong>${escapeHtml(p.reference)}</strong></td><td>${escapeHtml(p.supplier)}</td><td>${escapeHtml(p.productName)}</td><td>${Number(p.quantity) || 0}</td><td>${money(p.total)}</td><td>${statusBadge(p.status)}</td><td>${p.status === 'ordered' ? `<button class="action-button" data-receive-purchase="${escapeHtml(p.id)}">Receive delivery</button>` : 'Stock received'}</td></tr>`).join('') : `<tr><td colspan="7"><p class="empty-state">${activeProducts.length ? 'Record a supplier order above. The stock count changes after you receive the delivery.' : 'Add a product before recording a supplier order.'}</p></td></tr>`;
+  $$('[data-receive-purchase]').forEach((button) => button.addEventListener('click', async () => { button.disabled = true; try { await api(`/api/admin/purchases/${encodeURIComponent(button.dataset.receivePurchase)}/receive`, { method: 'PATCH', body: '{}' }); notify('Delivery received and stock updated.'); await loadInventory(); } catch (e) { button.disabled = false; notify(e.message, true); } }));
 }
-$('#purchaseForm').addEventListener('submit', async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); try { await api('/api/admin/purchases', { method: 'POST', body: JSON.stringify(data) }); showMessage($('#purchaseMessage'), 'Purchase order placed. Receive it when the delivery arrives.'); event.currentTarget.reset(); await loadInventory(); } catch (e) { showMessage($('#purchaseMessage'), e.message, true); } });
-$('#addProduct').addEventListener('click', async () => {
-  const name = prompt('Product name (e.g. hair serum)'); if (!name) return;
-  const price = Number(prompt('Retail price (₹)', '299')); if (!Number.isFinite(price)) return;
-  const stock = Number(prompt('How many units are in stock now? Enter a whole number.', '0')); if (!Number.isInteger(stock) || stock < 0) return;
-  const category = prompt('Category (e.g. Hair, Beard, Skin)', 'Styling') || 'General'; const sku = prompt('Product code (optional)', '') || '';
-  try { await api('/api/admin/products', { method: 'POST', body: JSON.stringify({ name, price, stock, category, sku }) }); notify('Product added to your stock list.'); await loadInventory(); } catch (e) { notify(e.message, true); }
+$('#inventorySearch').addEventListener('input', renderInventoryProducts);
+$('#inventoryFilter').addEventListener('change', renderInventoryProducts);
+$('#addProduct').addEventListener('click', openProductDialog);
+document.addEventListener('click', (event) => { const button = event.target.closest('[data-open-product]'); if (button) openProductDialog(); });
+$$('[data-close-dialog]').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
+$('#productForm').addEventListener('submit', async (event) => {
+  event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('[type="submit"]'); const values = Object.fromEntries(new FormData(form));
+  const payload = { ...values, price: Number(values.price), stock: Number(values.stock), lowStockAt: Number(values.lowStockAt) };
+  button.disabled = true; button.textContent = 'Saving…';
+  try { await api('/api/admin/products', { method: 'POST', body: JSON.stringify(payload) }); $('#productDialog').close(); notify('Product added to your stock list.'); await loadInventory(); }
+  catch (error) { showMessage($('#productMessage'), error.message, true); }
+  finally { button.disabled = false; button.textContent = 'Save product'; }
 });
+$('#receiveForm').addEventListener('submit', async (event) => {
+  event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('[type="submit"]'); const values = Object.fromEntries(new FormData(form));
+  button.disabled = true; button.textContent = 'Updating…';
+  try { await api(`/api/admin/products/${encodeURIComponent(values.productId)}/receive`, { method: 'POST', body: JSON.stringify({ quantity: Number(values.quantity), note: values.note || 'Supplier delivery' }) }); $('#receiveDialog').close(); notify('Received units added to stock.'); await loadInventory(); }
+  catch (error) { showMessage($('#receiveMessage'), error.message, true); }
+  finally { button.disabled = false; button.textContent = 'Add received units'; }
+});
+$('#purchaseForm').addEventListener('submit', async (event) => { event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form)); const button = $('#purchaseSubmit'); button.disabled = true; button.textContent = 'Recording…'; try { await api('/api/admin/purchases', { method: 'POST', body: JSON.stringify(data) }); showMessage($('#purchaseMessage'), 'Order recorded. When it arrives, choose “Receive delivery” to add the units to stock.'); form.reset(); await loadInventory(); } catch (e) { showMessage($('#purchaseMessage'), e.message, true); } finally { button.disabled = adminData.products.filter((p) => p.active).length === 0; button.textContent = 'Record supplier order'; } });
 
 async function loadReports() {
   const [report, orders, overview] = await Promise.all([api('/api/admin/analytics'), api('/api/admin/orders'), api('/api/admin/overview')]);
