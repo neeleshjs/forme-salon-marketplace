@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#f5f4ef">
+  <title>FORME Operations Console</title>
+  <link rel="stylesheet" href="/platform-admin.css?v=1">
+  <script src="/platform-admin.js?v=1" defer></script>
+</head>
+<body>
+  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <main id="app" class="page-shell">
+    <header class="brand-row"><a class="brand" href="/" aria-label="FORME home"><span class="brand-mark">F</span><span>FORMÉ <small>OPERATIONS</small></span></a><span class="secure-label"><span class="secure-dot"></span> Secure control room</span></header>
+    <section id="authScreen" class="auth-layout" hidden></section>
+    <section id="consoleScreen" class="console-layout" hidden>
+      <aside class="sidebar">
+        <div class="workspace-label">PLATFORM CONTROL</div>
+        <nav id="nav" aria-label="Platform sections">
+          <button data-page="overview" class="nav-item active"><span>◈</span> Overview</button>
+          <button data-page="businesses" class="nav-item"><span>▦</span> Businesses <b id="pendingBadge" class="nav-badge" hidden></b></button>
+          <button data-page="categories" class="nav-item"><span>◇</span> Categories</button>
+          <button data-page="audit" class="nav-item owner-only"><span>≡</span> Audit trail</button>
+          <button data-page="admins" class="nav-item owner-only"><span>♙</span> Admin access</button>
+        </nav>
+        <div class="sidebar-bottom"><div class="role-chip"><span class="role-dot"></span><span id="roleLabel">OWNER</span></div><button id="logoutButton" class="logout-button">Sign out <span>↗</span></button></div>
+      </aside>
+      <div class="main-column">
+        <header class="topbar"><div><span class="eyebrow">FORMÉ / OPERATIONS</span><h1 id="pageTitle">Overview</h1></div><div class="user-chip"><span class="avatar" id="avatar">F</span><span><strong id="adminName">Platform admin</strong><small id="adminEmail"></small></span></div></header>
+        <div id="view" class="content-view" aria-live="polite"></div>
+        <footer class="console-footer"><span>FORMÉ Platform Operations</span><span>Every action is recorded</span></footer>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -16,13 +16,14 @@ The web app uses direct, reloadable routes for each main customer and salon work
 - `/manage-booking` : reschedule or cancel with the booking reference.
 - `/partner` : salon partner overview.
 - `/partner/login` and `/partner/signup` : partner access.
+- `/platform-admin` : separate operations console for business verification, marketplace categories, administrator access, and audit activity.
 - `/studio/:section` : overview, appointments, point of sale, customers, inventory, reports, team, and settings.
 
 ## Run locally
 
 1. Install Node.js 20 or newer.
 2. In `server/`, run `npm install`.
-3. Copy `server/.env.example` to `server/.env`; set a private `SESSION_SECRET` and demo owner password before deployment.
+3. Copy `server/.env.example` to `server/.env`; set a private `SESSION_SECRET`, PostgreSQL `DATABASE_URL`, and the one-time platform-admin bootstrap email and token.
 4. Run `npm run dev` from `server/`.
 5. Open `http://localhost:5050`.
 6. Choose **Owner login**. Demo access: `owner@forme.studio` / `forme-demo-2026`.
@@ -31,11 +32,22 @@ Run the automated partner authentication and category checks from `server/` with
 
 ## Host a public demo
 
-This repository includes a Render Blueprint for a free Node web service. Once the repository is on GitHub, connect it in Render and create the service from `render.yaml`. The service serves the customer website and API from the same URL. Render generates a session secret and demo owner password for the hosted instance; inspect the service environment in Render if you need owner dashboard access.
+This repository includes a Render Blueprint for a free Node web service and free PostgreSQL database. The service serves the customer website and APIs from the same URL. The salon partner dashboard and the platform-admin console use separate account records and sign-in sessions.
 
-The free demo uses local JSON files and has no persistent disk, so bookings, accounts, reviews, and salon data can reset when the service restarts or redeploys. Razorpay is not configured by default, so deposits use the labeled demo payment flow. Use a persistent database and configure a payment provider before relying on it for real customers.
+The free PostgreSQL database is suitable for development and early validation, but review Render's current free-database retention and backup limits before relying on it for important customer records. Razorpay is not configured by default, so deposits use the labeled demo payment flow.
 
 The first start creates the demo owner and FORME location in `server/data/platform.json`. Salon records are stored separately under `server/data/tenants/`; FORME's original demo records remain in `server/data/studio.json`. These local JSON files, `.env`, and `node_modules` are ignored by Git.
+
+## Platform-admin console
+
+- Open `/platform-admin`. It is separate from `/partner/login` and does not accept salon owner or customer credentials.
+- The first-owner email comes from `PLATFORM_ADMIN_BOOTSTRAP_EMAIL`, or from `GMAIL_SMTP_USER` when the explicit allowlist is unset. The Render Blueprint generates a private random `PLATFORM_ADMIN_BOOTSTRAP_TOKEN`; do not put it in Git or send it in chat.
+- Complete the one-time first-owner setup, use a unique password of at least 12 characters, and enroll the generated secret in an authenticator app. The setup challenge expires after 15 minutes. Once the first owner exists, public owner setup is closed.
+- The owner can invite reviewers and view-only support admins. Every administrator must enroll TOTP MFA. Owners can promote existing admins and immediately revoke access by deactivating an account.
+- New partner listings enter `pending_review` and stay out of public search and booking until approved. Existing businesses without a review status remain treated as approved to preserve current listings. The partner dashboard displays the decision and reviewer note.
+- Reviewers can approve, reject, or suspend listings. Owners can manage categories and subcategories. Important changes are recorded in the platform-admin audit table; its API exposes no edit or delete action.
+- Sessions use an HttpOnly, Secure-on-HTTPS, SameSite=Strict cookie, CSRF token, an eight-hour expiry, server-side revocation, and TOTP replay prevention. MFA secrets are encrypted in PostgreSQL using a key derived from `SESSION_SECRET`; rotating that secret will require administrators to enroll MFA again.
+- The admin console is an initial operations layer, not a claim of complete production readiness. Payment disputes/refunds, customer-support case management, evidence-document storage, WebAuthn/passkeys, recovery codes, and independent security review are future work.
 
 ## Salon partner workflow
 
@@ -69,3 +81,4 @@ Razorpay Standard Checkout is wired for server-created orders and server-side pa
 - Account routes: `POST /api/auth/register`, `/verify-registration`, `/login`, `/select`, `/switch-context`, `/password-reset/start`, `/password-reset/complete`; `GET /api/auth/me`. Customer signup uses `POST /api/customer/register` and `/verify-registration`, then `/login`, `/password-reset/start`, `/password-reset/complete`, and `/me`.
 - Public booking routes: `GET /api/services`, `/api/staff`, `/api/availability`; `POST /api/appointments`, `/api/booking/lookup`; `PATCH /api/booking/:reference`.
 - Owner routes under `/api/admin/*` use the `x-session-token` header and include branch management and cross-branch portfolio metrics.
+- Platform operations use a separate `/api/platform-admin/*` API with database-backed admin accounts, roles, TOTP MFA, revocable sessions, business review, category configuration, invitations, and audit history.

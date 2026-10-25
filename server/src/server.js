@@ -8,6 +8,7 @@ import path from 'node:path';
 import { randomUUID, randomBytes, randomInt, timingSafeEqual, createHmac, scryptSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { registerPlatformAdminRoutes } from './platform-admin.js';
 
 const app = express();
 const port = Number(process.env.PORT || 5050);
@@ -253,7 +254,25 @@ function verifyToken(token) {
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function slugify(value) { return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'salon'; }
 async function writePlatform(platform) {
-  if (databasePool) return writeDocument('platform', platform);
+  if (databasePool) {
+    await ensureDatabase(); const client = await databasePool.connect();
+    try {
+      await client.query('BEGIN'); await client.query('SELECT pg_advisory_xact_lock($1)', [784215903]);
+      const { rows } = await client.query("SELECT payload FROM forme_documents WHERE document_key='platform' FOR UPDATE");
+      const latestTenants = new Map((rows[0]?.payload?.tenants || []).map((tenant) => [tenant.id, tenant]));
+      for (const tenant of platform.tenants || []) {
+        const latest = latestTenants.get(tenant.id);
+        if (latest?.reviewDecisionAt && (!tenant.reviewDecisionAt || latest.reviewDecisionAt > tenant.reviewDecisionAt)) {
+          tenant.reviewStatus = latest.reviewStatus; tenant.reviewNote = latest.reviewNote || ''; tenant.reviewDecisionAt = latest.reviewDecisionAt; tenant.reviewDecisionBy = latest.reviewDecisionBy;
+        }
+      }
+      await client.query(`INSERT INTO forme_documents (document_key,payload) VALUES ('platform',$1::jsonb)
+        ON CONFLICT (document_key) DO UPDATE SET payload=EXCLUDED.payload,updated_at=NOW()`, [JSON.stringify(platform)]);
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+    finally { client.release(); }
+    return;
+  }
   await fs.mkdir(path.dirname(platformFile), { recursive: true });
   const temp = `${platformFile}.tmp`;
   await fs.writeFile(temp, JSON.stringify(platform, null, 2), 'utf8');
@@ -285,8 +304,9 @@ async function readPlatform() {
   }
 }
 function tenantChoices(platform, user) {
-  return platform.tenants.filter((tenant) => tenant.active && user.tenantIds.includes(tenant.id)).map((tenant) => ({ id: tenant.id, slug: tenant.slug, name: tenant.name, categoryId: tenant.categoryId || 'hair-salon', categoryName: tenant.categoryName || 'Hair salon and unisex salon', subcategoryId: tenant.subcategoryId || null, subcategoryName: tenant.subcategoryName || null, branches: tenant.branches.filter((branch) => branch.active).map(({ id, name, slug, city, country, currency, timeZone }) => ({ id, name, slug, city, country, currency, timeZone })) }));
+  return platform.tenants.filter((tenant) => tenant.active && user.tenantIds.includes(tenant.id)).map((tenant) => ({ id: tenant.id, slug: tenant.slug, name: tenant.name, categoryId: tenant.categoryId || 'hair-salon', categoryName: tenant.categoryName || 'Hair salon and unisex salon', subcategoryId: tenant.subcategoryId || null, subcategoryName: tenant.subcategoryName || null, reviewStatus: tenant.reviewStatus || 'approved', reviewNote: tenant.reviewNote || '', branches: tenant.branches.filter((branch) => branch.active).map(({ id, name, slug, city, country, currency, timeZone }) => ({ id, name, slug, city, country, currency, timeZone })) }));
 }
+function tenantWorkspace(tenant, branch) { return { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone, reviewStatus: tenant.reviewStatus || 'approved', reviewNote: tenant.reviewNote || '' }; }
 function makeSession(user, tenant, branch) {
   return signToken({ type: 'session', userId: user.id, authVersion: accountAuthVersion(user), email: user.email, tenantId: tenant.id, branchId: branch.id, role: tenant.ownerUserId === user.id ? 'owner' : 'manager', exp: Date.now() + 12 * 60 * 60 * 1000 });
 }
@@ -324,7 +344,7 @@ async function createTenantForUser(platform, user, details) {
   const category = await resolveBusinessCategory(details.categoryId || 'hair-salon', details.subcategoryId || '');
   const baseSlug = slugify(businessName);
   const slug = platform.tenants.some((t) => t.slug === baseSlug) ? `${baseSlug}-${randomBytes(2).toString('hex')}` : baseSlug;
-  const tenant = { id: randomUUID(), slug, name: businessName, ...category, ownerUserId: user.id, userIds: [user.id], createdAt: new Date().toISOString(), active: true, branches: [] };
+  const tenant = { id: randomUUID(), slug, name: businessName, ...category, ownerUserId: user.id, userIds: [user.id], createdAt: new Date().toISOString(), active: true, reviewStatus: 'pending_review', reviewNote: '', branches: [] };
   const coordinates = parseCoordinates(details);
   const branch = { id: randomUUID(), name: branchName, slug: slugify(`${branchName}-${city || country}`), city, country, countryCode, currency, timeZone, locale: String(details.locale || 'en'), ...coordinates, isDefault: false, active: true };
   tenant.branches.push(branch);
@@ -634,7 +654,7 @@ app.get('/api/public/salons', async (req, res, next) => {
   try {
     const platform = await readPlatform(); const q = String(req.query.q || '').toLowerCase(); const city = String(req.query.city || '').toLowerCase(); const country = String(req.query.country || '').toLowerCase();
     const userLatitude = Number(req.query.lat); const userLongitude = Number(req.query.lng); const hasLocation = Number.isFinite(userLatitude) && userLatitude >= -90 && userLatitude <= 90 && Number.isFinite(userLongitude) && userLongitude >= -180 && userLongitude <= 180;
-    const locations = platform.tenants.filter((t) => t.active && (!q || `${t.name} ${t.branches.map((b) => `${b.city} ${b.country}`).join(' ')}`.toLowerCase().includes(q))).flatMap((t) => t.branches.filter((b) => b.active && (!city || b.city.toLowerCase().includes(city)) && (!country || b.country.toLowerCase() === country)).map((b) => ({ tenant: t, branch: b })));
+    const locations = platform.tenants.filter((t) => t.active && (t.reviewStatus || 'approved') === 'approved' && (!q || `${t.name} ${t.branches.map((b) => `${b.city} ${b.country}`).join(' ')}`.toLowerCase().includes(q))).flatMap((t) => t.branches.filter((b) => b.active && (!city || b.city.toLowerCase().includes(city)) && (!country || b.country.toLowerCase() === country)).map((b) => ({ tenant: t, branch: b })));
     const salons = await Promise.all(locations.map(async ({ tenant, branch }) => { const state = await readStateFor({ tenant, branch }); const reviews = state.reviews || []; const ratingCount = reviews.length; return { name: tenant.name, slug: tenant.slug, categoryId: tenant.categoryId || 'hair-salon', categoryName: tenant.categoryName || 'Hair salon and unisex salon', subcategoryId: tenant.subcategoryId || null, subcategoryName: tenant.subcategoryName || null, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone, latitude: branch.latitude ?? null, longitude: branch.longitude ?? null, averageRating: ratingCount ? Math.round(reviews.reduce((sum, review) => sum + review.rating, 0) / ratingCount * 10) / 10 : null, ratingCount, distanceKm: hasLocation && Number.isFinite(branch.latitude) && Number.isFinite(branch.longitude) ? Math.round(distanceKm(userLatitude, userLongitude, branch.latitude, branch.longitude) * 10) / 10 : null }; }));
     if (hasLocation) salons.sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
     res.json(salons);
@@ -725,7 +745,7 @@ app.post('/api/auth/verify-registration', async (req, res, next) => {
     else { if (user.phone !== data.phone) user.phoneVerifiedAt = null; user.phone = data.phone; user.emailVerifiedAt ||= new Date().toISOString(); }
     user.tenantIds ||= []; const { tenant, branch } = await createTenantForUser(platform, user, data.tenantDetails);
     platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.id !== challenge.id); await writePlatform(platform);
-    res.status(201).json({ sessionToken: makeSession(user, tenant, branch), user: { id: user.id, name: user.name, email: user.email }, workspace: { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone }, organizations: tenantChoices(platform, user) });
+    res.status(201).json({ sessionToken: makeSession(user, tenant, branch), user: { id: user.id, name: user.name, email: user.email }, workspace: tenantWorkspace(tenant, branch), organizations: tenantChoices(platform, user) });
   } catch (e) { if (e.message.startsWith('Enter a business') || e.message.startsWith('Choose a') || e.message.startsWith('Enter both valid map coordinates')) return res.status(400).json({ error: e.message }); next(e); }
 });
 app.post('/api/auth/login', async (req, res, next) => {
@@ -763,7 +783,7 @@ app.post('/api/auth/select', async (req, res, next) => {
     const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === req.body?.tenantId && t.active && t.userIds.includes(user?.id)); const branch = tenant?.branches.find((b) => b.id === req.body?.branchId && b.active);
     if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your sign-in session expired. Please sign in again.' });
     if (!user || !tenant || !branch) return res.status(403).json({ error: 'You do not have access to this salon location.' });
-    res.json({ sessionToken: makeSession(user, tenant, branch), user: { id: user.id, name: user.name, email: user.email }, workspace: { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone }, organizations: tenantChoices(platform, user) });
+    res.json({ sessionToken: makeSession(user, tenant, branch), user: { id: user.id, name: user.name, email: user.email }, workspace: tenantWorkspace(tenant, branch), organizations: tenantChoices(platform, user) });
   } catch (e) { next(e); }
 });
 app.get('/api/auth/me', async (req, res, next) => {
@@ -772,7 +792,7 @@ app.get('/api/auth/me', async (req, res, next) => {
     const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === auth.tenantId && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === auth.branchId);
     if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     if (!tenant || !branch) return res.status(401).json({ error: 'This workspace is no longer available.' });
-    res.json({ user: { id: user.id, name: user.name, email: user.email }, workspace: { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone }, organizations: tenantChoices(platform, user) });
+    res.json({ user: { id: user.id, name: user.name, email: user.email }, workspace: tenantWorkspace(tenant, branch), organizations: tenantChoices(platform, user) });
   } catch (e) { next(e); }
 });
 app.post('/api/auth/switch-context', async (req, res, next) => {
@@ -781,7 +801,7 @@ app.post('/api/auth/switch-context', async (req, res, next) => {
     const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === req.body?.tenantId && t.active && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === req.body?.branchId && b.active);
     if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     if (!tenant || !branch) return res.status(403).json({ error: 'You do not have access to this salon location.' });
-    res.json({ sessionToken: makeSession(user, tenant, branch), workspace: { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone } });
+    res.json({ sessionToken: makeSession(user, tenant, branch), workspace: tenantWorkspace(tenant, branch) });
   } catch (e) { next(e); }
 });
 app.post('/api/auth/create-organization', async (req, res, next) => {
@@ -789,9 +809,10 @@ app.post('/api/auth/create-organization', async (req, res, next) => {
     const auth = verifyToken(req.get('x-session-token')); if (auth?.type !== 'session') return res.status(401).json({ error: 'Sign in to continue.' });
     const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     const { tenant, branch } = await createTenantForUser(platform, user, req.body || {}); await writePlatform(platform);
-    res.status(201).json({ sessionToken: makeSession(user, tenant, branch), workspace: { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone } });
+    res.status(201).json({ sessionToken: makeSession(user, tenant, branch), workspace: tenantWorkspace(tenant, branch) });
   } catch (e) { if (e.message.startsWith('Enter a business') || e.message.startsWith('Choose a')) return res.status(400).json({ error: e.message }); next(e); }
 });
+registerPlatformAdminRoutes(app, { databasePool, ensureDatabase, sessionSecret, readPlatform, sendEmail });
 app.use('/api', async (req, res, next) => {
   if (req.path === '/health' || req.path.startsWith('/auth/') || req.path === '/public/salons') return next();
   try {
@@ -803,7 +824,7 @@ app.use('/api', async (req, res, next) => {
       if (!user || !authVersionMatches(auth, user) || !tenant || !branch) return res.status(401).json({ error: 'This workspace session is no longer valid. Please sign in again.' });
       return scopeStorage.run({ platform, user, tenant, branch, session: auth }, next);
     }
-    const slug = String(req.get('x-salon-slug') || req.query.salon || 'forme').toLowerCase(); const tenant = platform.tenants.find((t) => t.slug === slug && t.active);
+    const slug = String(req.get('x-salon-slug') || req.query.salon || 'forme').toLowerCase(); const tenant = platform.tenants.find((t) => t.slug === slug && t.active && (t.reviewStatus || 'approved') === 'approved');
     const requestedBranch = req.get('x-branch-id') || req.query.branch; const branch = tenant?.branches.find((b) => b.active && (!requestedBranch || b.id === requestedBranch || b.slug === requestedBranch)) || (!requestedBranch ? tenant?.branches.find((b) => b.active) : null);
     if (!tenant || !branch) return res.status(404).json({ error: 'Salon location not found.' });
     return scopeStorage.run({ platform, tenant, branch }, next);
@@ -1181,7 +1202,8 @@ app.get('/api/admin/ics/:id', async (req, res, next) => {
   try { const s = await readState(); const a = s.appointments.find((x) => x.id === req.params.id); if (!a) return res.status(404).end(); const date = a.date.replaceAll('-', ''); const time = a.time.replace(':', '') + '00'; const end = minutes(a.time) + a.minutes; const endTime = `${String(Math.floor(end / 60)).padStart(2, '0')}${String(end % 60).padStart(2, '0')}00`; res.type('text/calendar').attachment(`booking-${a.reference}.ics`).send(`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//FORME//Barber Studio//EN\r\nBEGIN:VEVENT\r\nUID:${a.id}@forme.local\r\nDTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}\r\nDTSTART:${date}T${time}\r\nDTEND:${date}T${endTime}\r\nSUMMARY:${a.serviceName} at FORME\r\nDESCRIPTION:Booking ${a.reference} with ${a.staffName}\r\nEND:VEVENT\r\nEND:VCALENDAR`); } catch (e) { next(e); }
 });
 
+app.get('/platform-admin', (_req, res) => { res.set({ 'Content-Security-Policy': "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'", 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' }); res.sendFile(path.join(clientDir, 'platform-admin.html')); });
 app.get('*', (req, res, next) => { if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'API endpoint not found.' }); if (path.extname(req.path)) return next(); if (req.accepts('html')) return res.sendFile(path.join(clientDir, 'index.html')); next(); });
 
-app.use((error, _req, res, _next) => { console.error(error); res.status(500).json({ error: 'Something went wrong. Please try again.' }); });
+app.use((error, _req, res, _next) => { console.error(error); res.status(Number.isInteger(error.statusCode) ? error.statusCode : 500).json({ error: Number.isInteger(error.statusCode) ? error.message : 'Something went wrong. Please try again.' }); });
 app.listen(port, () => console.log(`FORME Barber Studio listening on port ${port}`));
