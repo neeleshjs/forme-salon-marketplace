@@ -190,3 +190,93 @@ a,button,input,select,textarea{-webkit-tap-highlight-color:transparent}
 .password-visibility-toggle svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 
 .group-booking-help{display:block;margin-top:.25rem;color:#737970;font-size:.75rem;line-height:1.45}
+
+/* Partner sign-in and signup: responsive workspace entry */
+body[data-page="partner-login"] .admin-shell,
+body[data-page="partner-signup"] .admin-shell{background:#f3f2ec;backdrop-filter:none}
+.admin-gate#adminGate{width:min(1180px,100%);min-height:100svh;margin-inline:auto;padding:clamp(20px,4vw,54px);grid-template-columns:minmax(0,1.08fr) minmax(360px,.92fr);gap:clamp(24px,5vw,76px);place-items:stretch center}
+.partner-login-aside{position:relative;isolation:isolate;display:flex;min-height:610px;flex-direction:column;justify-content:space-between;align-self:stretch;overflow:hidden;padding:clamp(30px,5vw,58px);border:1px solid #ffffff12;border-radius:24px;background:radial-gradient(ellipse at 8% 90%,#435443 0,transparent 46%),radial-gradient(ellipse at 100% 0,#46563d 0,transparent 36%),#17211c;color:#f6f1e7;box-shadow:0 28px 70px #15221b1c}
+.partner-login-aside:after{position:absolute;z-index:-1;right:-100px;bottom:80px;width:330px;height:330px;border:1px solid #ffffff12;border-radius:50%;box-shadow:0 0 0 34px #ffffff06,0 0 0 68px #ffffff04;content:""}
+.partner-login-brand{display:inline-flex;width:max-content;align-items:center;gap:12px;color:#f6f1e7;font-size:14px;font-weight:700;letter-spacing:.16em;text-decoration:none}
+.partner-login-brand .brand-mark{width:42px;height:42px;background:var(--lime);color:var(--green);font-size:24px}
+.partner-login-brand small{display:block;margin-top:4px;color:#b9c2b3;font-size:8px;letter-spacing:.2em}
+.partner-login-hero{max-width:500px;margin:48px 0 34px}
+.partner-login-kicker{color:#c4d49a;font-size:10px;font-weight:700;letter-spacing:.17em}
+.partner-login-hero h1{margin:18px 0 14px;font:500 clamp(42px,5vw,64px)/1.02 "Playfair Display",serif;letter-spacing:-.045em}
+.partner-login-hero h1 em{color:var(--lime);font-weight:500}
+.partner-login-hero p{max-width:420px;margin:0;color:#d0d6ca;font-size:15px;line-height:1.75}
+.partner-login-highlights{display:grid;gap:0;border-top:1px solid #ffffff25}
+.partner-login-highlights article{display:grid;grid-template-columns:38px 1fr;gap:14px;align-items:start;padding:16px 0;border-bottom:1px solid #ffffff25}
+.partner-login-highlights article>span{display:grid;width:30px;height:30px;place-items:center;border:1px solid #c4d49a55;border-radius:50%;color:#d6e2b3;font-size:9px;font-weight:700}
+.partner-login-highlights article div{display:grid;gap:4px}
+.partner-login-highlights strong{font-size:13px;font-weight:600}
+.partner-login-highlights small{color:#b9c2b3;font-size:11px;line-height:1.55}
+.partner-login-footer{display:flex;flex-wrap:wrap;justify-content:space-between;gap:14px;margin-top:25px;color:#c3ccbd;font-size:10px}
+.partner-login-footer>span{display:inline-flex;align-items:center;gap:8px}
+.partner-login-footer i{width:7px;height:7px;border-radius:50%;background:#c4d49a;box-shadow:0 0 0 4px #c4d49a22}
+.partner-login-footer a{color:#e7eadf;text-decoration:none}
+.partner-login-footer a:hover{text-decoration:underline;text-underline-offset:3px}
+.partner-login-footer b{padding-left:4px;color:var(--lime)}
+.gate-card.auth-card{position:relative;width:min(460px,100%);max-height:min(90vh,900px);align-self:center;overflow:auto;padding:clamp(28px,4vw,44px);border:1px solid #e9e7df;border-radius:22px;background:#fffdf8;box-shadow:0 24px 70px #15221b12}
+.gate-card.auth-card .eyebrow{padding-right:36px;color:#77816d;font-size:9px}
+.gate-card.auth-card h2{margin:14px 0 8px;font-size:clamp(30px,3.2vw,38px);line-height:1.12;letter-spacing:-.03em}
+.gate-card.auth-card>p{margin:0 0 25px;color:#6c7369;font-size:13px;line-height:1.65}
+.gate-card.auth-card form{gap:15px}
+.gate-card.auth-card form label,.workspace-chooser label{display:grid;gap:7px;color:#30382f;font-size:12px;font-weight:600;letter-spacing:0}
+.gate-card.auth-card input,.gate-card.auth-card select,.workspace-chooser select{width:100%;min-height:48px;padding:0 13px;border:1px solid #dcded5;border-radius:10px;background:#fff;color:#20291f;font-size:15px;outline:0;transition:border-color .18s,box-shadow .18s}
+.gate-card.auth-card input:focus,.gate-card.auth-card select:focus,.workspace-chooser select:focus{border-color:#73845e;box-shadow:0 0 0 3px #73845e20}
+.gate-card.auth-card input::placeholder{color:#a0a59a}
+.gate-card.auth-card .password-field{display:flex}
+.gate-card.auth-card .password-field>input{padding-right:52px!important}
+.gate-card.auth-card .password-visibility-toggle{right:4px}
+.gate-card.auth-card #authSubmit,.gate-card.auth-card .button-dark,.workspace-chooser .button-dark{width:100%;min-height:50px;border-radius:10px;font-size:13px;transition:background .18s,transform .18s,opacity .18s}
+.gate-card.auth-card #authSubmit[aria-busy="true"]{cursor:wait;opacity:.8}
+.gate-card.auth-card button:disabled{cursor:wait;opacity:.65;transform:none}
+.gate-card.auth-card #partnerForgotPasswordButton{width:max-content;justify-self:end;margin:-9px 0 0;padding:4px 0;color:#506447;font-size:12px;text-decoration:none}
+.gate-card.auth-card #partnerForgotPasswordButton:hover{text-decoration:underline;text-underline-offset:3px}
+.gate-card.auth-card .auth-toggle:not(#partnerForgotPasswordButton){margin:17px 0 0;padding:15px 0 0;border-top:1px solid #e9e8e1;color:#506447;font-size:12px;text-decoration:none}
+.gate-card.auth-card .auth-toggle:not(#partnerForgotPasswordButton):hover{text-decoration:underline;text-underline-offset:3px}
+.gate-card.auth-card .form-message{min-height:0;padding-top:2px;font-size:12px}
+.gate-card.auth-card .form-message:not(:empty){margin-top:2px}
+.gate-card.auth-card .auth-create-fields{gap:13px}
+.gate-card.auth-card .auth-create-fields .form-help{margin:0;padding:12px 14px;font-size:12px}
+.gate-card.auth-card .field-help{font-size:11px}
+.workspace-chooser{display:grid;gap:12px;margin-top:18px;padding:18px;border:1px solid #e3e7dc;border-radius:13px;background:#f5f7f1}
+.workspace-chooser[hidden]{display:none}
+.workspace-chooser h3{margin:0;font-size:17px}
+.workspace-chooser p{margin:0;color:#687064;font-size:12px;line-height:1.6}
+.workspace-chooser label{gap:7px}
+@media(max-width:850px){
+  .admin-gate#adminGate{width:100%;min-height:100svh;padding:0;grid-template-columns:minmax(0,1fr);gap:0;place-items:stretch}
+  .partner-login-aside{min-height:0;padding:23px max(22px,calc((100vw - 560px)/2)) 20px;border:0;border-radius:0 0 22px 22px;box-shadow:0 12px 32px #15221b18}
+  .partner-login-aside:after{right:-175px;bottom:30px;width:260px;height:260px}
+  .partner-login-brand .brand-mark{width:36px;height:36px;font-size:21px}
+  .partner-login-hero{margin:22px 0 18px}
+  .partner-login-hero h1{margin:10px 0 8px;font-size:clamp(32px,8vw,42px)}
+  .partner-login-hero p{max-width:520px;font-size:13px;line-height:1.55}
+  .partner-login-kicker{font-size:8px}
+  .partner-login-highlights{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;border:0}
+  .partner-login-highlights article{display:block;padding:10px 9px;border:1px solid #ffffff24;border-radius:10px;background:#ffffff08}
+  .partner-login-highlights article>span{display:none}
+  .partner-login-highlights article div{gap:0}
+  .partner-login-highlights strong{font-size:10px;line-height:1.35}
+  .partner-login-highlights small{display:none}
+  .partner-login-footer{margin-top:15px;font-size:9px}
+  .gate-card.auth-card{width:min(calc(100% - 28px),560px);max-height:none;margin:18px auto 30px;padding:25px 22px;border-radius:18px;overflow:visible;box-shadow:0 12px 36px #15221b0d}
+  .gate-card.auth-card h2{font-size:31px}
+  .gate-card.auth-card>p{margin-bottom:22px;font-size:12px}
+  .gate-card.auth-card form{gap:14px}
+  .gate-card.auth-card form label,.workspace-chooser label{font-size:12px}
+  .gate-card.auth-card input,.gate-card.auth-card select,.workspace-chooser select{min-height:49px;font-size:16px}
+  .gate-card.auth-card #authSubmit,.gate-card.auth-card .button-dark,.workspace-chooser .button-dark{min-height:50px}
+  .admin-shell{overflow-y:auto;overscroll-behavior:contain}
+}
+@media(max-width:420px){
+  .partner-login-aside{padding-inline:18px}
+  .partner-login-highlights{gap:6px}
+  .partner-login-highlights article{padding:9px 7px}
+  .partner-login-highlights strong{font-size:9px}
+  .partner-login-footer{align-items:flex-start;flex-direction:column;gap:9px}
+  .gate-card.auth-card{width:calc(100% - 20px);margin-top:12px;padding:23px 18px}
+  .gate-card.auth-card .auth-create-fields .form-row{grid-template-columns:1fr;gap:13px}
+}
