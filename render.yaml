@@ -12,6 +12,8 @@ services:
         value: 20
       - key: SESSION_SECRET
         generateValue: true
+      - key: EVENT_PII_ENCRYPTION_KEY
+        generateValue: true
       - key: PLATFORM_ADMIN_BOOTSTRAP_EMAIL
         sync: false
       - key: PLATFORM_ADMIN_BOOTSTRAP_TOKEN

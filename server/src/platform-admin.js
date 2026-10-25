@@ -269,6 +269,7 @@ export function registerPlatformAdminRoutes(app, { databasePool, ensureDatabase,
         if (!tenant) return res.status(404).json({ error: 'Business was not found.' });
         const previous = reviewStatus(tenant); tenant.reviewStatus = status; tenant.reviewNote = reason; tenant.reviewDecisionAt = new Date().toISOString(); tenant.reviewDecisionBy = req.platformAdmin.id;
         await client.query(`UPDATE forme_documents SET payload=$1::jsonb,updated_at=NOW() WHERE document_key='platform'`, [JSON.stringify(platform)]);
+      await client.query('UPDATE marketplace_businesses SET review_status=$1,updated_at=NOW() WHERE id=$2', [status, tenant.id]);
         await audit(client, req.platformAdmin, req, `business.${status}`, 'business', tenant.id, reason, { previousStatus: previous, newStatus: status, businessName: tenant.name });
         res.json({ business: businessReviewRow(tenant, platform) });
       });
@@ -307,6 +308,25 @@ export function registerPlatformAdminRoutes(app, { databasePool, ensureDatabase,
       const name = String(req.body?.name || '').trim().slice(0, 80); const slug = safeSlug(req.body?.slug || name); const active = req.body?.active !== false; if (name.length < 2 || !slug) return res.status(400).json({ error: 'Enter a subcategory name and valid slug.' });
       return await transact(async (client) => { const result = await client.query('UPDATE marketplace_subcategories SET name=$1,slug=$2,active=$3,updated_at=NOW() WHERE id=$4 AND category_id=$5 RETURNING id,slug,name,active', [name, slug, active, req.params.id, req.params.categoryId]); if (!result.rowCount) return res.status(404).json({ error: 'Subcategory not found.' }); await audit(client, req.platformAdmin, req, 'subcategory.updated', 'subcategory', req.params.id, active ? 'Subcategory updated' : 'Subcategory deactivated', { categoryId: req.params.categoryId, name, slug, active }); res.json(result.rows[0]); });
     } catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'That subcategory slug already exists in this category.' }); next(error); }
+  });
+  router.get('/event-occasions', roles('owner', 'reviewer', 'support'), async (_req, res, next) => {
+    try { const result = await query('SELECT id,slug,name,active,sort_order AS "sortOrder" FROM event_occasions ORDER BY sort_order,name'); res.json(result.rows); }
+    catch (error) { next(error); }
+  });
+  router.post('/event-occasions', roles('owner'), async (req, res, next) => {
+    try {
+      const name = String(req.body?.name || '').trim().slice(0, 80); const slug = safeSlug(req.body?.slug || name);
+      if (name.length < 2 || !slug) return res.status(400).json({ error: 'Enter an event type name and valid short slug.' });
+      const id = randomUUID();
+      return await transact(async (client) => { await client.query('INSERT INTO event_occasions (id,slug,name,sort_order) VALUES ($1,$2,$3,$4)', [id, slug, name, Math.max(0, Number(req.body?.sortOrder) || 0)]); await audit(client, req.platformAdmin, req, 'event_occasion.created', 'event_occasion', id, 'Event type created', { name, slug }); res.status(201).json({ id, slug, name, active: true }); });
+    } catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'An event type already uses that slug.' }); next(error); }
+  });
+  router.patch('/event-occasions/:id', roles('owner'), async (req, res, next) => {
+    try {
+      const name = String(req.body?.name || '').trim().slice(0, 80); const slug = safeSlug(req.body?.slug || name); const active = req.body?.active !== false;
+      if (name.length < 2 || !slug) return res.status(400).json({ error: 'Enter an event type name and valid short slug.' });
+      return await transact(async (client) => { const result = await client.query('UPDATE event_occasions SET name=$1,slug=$2,active=$3,updated_at=NOW() WHERE id=$4 RETURNING id,slug,name,active', [name, slug, active, req.params.id]); if (!result.rowCount) return res.status(404).json({ error: 'Event type not found.' }); await audit(client, req.platformAdmin, req, 'event_occasion.updated', 'event_occasion', req.params.id, active ? 'Event type updated' : 'Event type deactivated', { name, slug, active }); res.json(result.rows[0]); });
+    } catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'An event type already uses that slug.' }); next(error); }
   });
   router.get('/audit', roles('owner'), async (req, res, next) => {
     try { const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50)); const before = Number.parseInt(req.query.before, 10) || Number.MAX_SAFE_INTEGER; const { rows } = await query(`SELECT id,actor_email AS "actorEmail",action,target_type AS "targetType",target_id AS "targetId",reason,metadata,remote_address AS "remoteAddress",created_at AS "createdAt" FROM platform_admin_audit_events WHERE id<$1 ORDER BY id DESC LIMIT $2`, [before, limit]); res.json({ events: rows, nextBefore: rows.length === limit ? rows.at(-1).id : null }); }

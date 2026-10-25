@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#f7f4ee" />
+  <meta name="description" content="Find verified wedding beauty professionals and request a clear, itemized event quote with FORME." />
+  <title>Weddings and events - FORME</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="event-marketplace-body">
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="FORME home"><span class="brand-mark">F</span><span>FORME<small>BEAUTY & WELLNESS</small></span></a>
+    <nav aria-label="Main navigation"><a href="/salons">Find a salon</a><a class="event-nav-current" href="/events">Weddings &amp; events</a><a href="/account">My bookings</a><a href="/partner">For partners</a></nav>
+    <a class="button button-dark event-signin-link" href="/account">Sign in</a>
+  </header>
+  <main>
+    <section class="event-hero wrap">
+      <div class="event-hero-copy"><span class="eyebrow">YOUR DAY, YOUR BEAUTY TEAM</span><h1>Wedding beauty,<br /><em>beautifully planned.</em></h1><p>Discover verified makeup artists, mehendi professionals and beauty teams. Share your event details, compare an itemized quote and confirm only when you are ready.</p><a class="button button-dark" href="#eventSearch">Find event professionals <span>↘</span></a><small>At a studio · At home · At your venue</small></div>
+      <div class="event-hero-card"><span class="event-card-ornament">FORME / EVENTS</span><strong>One special day.<br />A team that fits.</strong><p>See packages, travel areas and service details before you request a quote.</p><span class="event-card-rule"></span><span class="event-card-note">BRIDAL · GROOM · FAMILY · GUESTS</span></div>
+    </section>
+    <section class="event-search-section wrap" id="eventSearch">
+      <div class="event-section-heading"><div><span class="eyebrow">VERIFIED EVENT PROVIDERS</span><h2>Find your beauty team.</h2><p>Browse approved FORME businesses. A quote request is not a confirmed booking.</p></div></div>
+      <form id="eventSearchForm" class="event-search-form">
+        <label>City or area<input name="city" placeholder="e.g. Jaipur" autocomplete="address-level2" /></label>
+        <label>Event type<select name="occasionId"><option value="">All event types</option></select></label>
+        <label>Service location<select name="mode"><option value="">Any location</option><option value="venue">Event venue</option><option value="home">At home</option><option value="business">At provider location</option></select></label>
+        <label>Search provider or package<input name="q" placeholder="e.g. bridal makeup" /></label>
+        <button class="button button-dark" type="submit">Search providers</button>
+      </form>
+      <p class="event-status" id="providerStatus" role="status" aria-live="polite">Loading verified event providers…</p>
+      <div class="event-provider-grid" id="eventProviders"></div>
+      <div class="event-pagination"><button class="button button-outline" id="eventPrevious" type="button" disabled>Previous</button><span id="eventPageLabel">Page 1</span><button class="button button-outline" id="eventNext" type="button" disabled>Next</button></div>
+    </section>
+    <section class="event-how-section">
+      <div class="wrap"><span class="eyebrow">A CLEARER WAY TO PLAN</span><h2>From first idea to confirmed team.</h2><div class="event-how-grid"><article><span>01</span><h3>Choose a provider</h3><p>Check services, package details, supported locations and travel rules.</p></article><article><span>02</span><h3>Share your event plan</h3><p>Tell the provider the date, ready-by time, venue and who needs each service.</p></article><article><span>03</span><h3>Review the quote</h3><p>Compare the itemized services, travel fee, deposit and expiry before accepting.</p></article></div></div>
+    </section>
+    <section class="event-requests-section wrap" id="myEventRequests" hidden><div class="event-section-heading"><div><span class="eyebrow">YOUR EVENT PLANS</span><h2>Quote requests and bookings.</h2><p>Track each request and respond to the provider’s latest quote here.</p></div><button id="refreshEventRequests" class="button button-outline" type="button">Refresh</button></div><p id="eventRequestsStatus" class="event-status" role="status" aria-live="polite"></p><div id="eventRequestsList" class="event-request-list"></div></section>
+  </main>
+  <footer class="footer event-footer"><div class="wrap footer-inner"><a class="brand" href="/"><span class="brand-mark">F</span><span>FORME<small>BEAUTY & WELLNESS</small></span></a><span>Find a team for your wedding or special event.</span><a href="/partner">List your services ↗</a></div></footer>
+
+  <dialog class="event-dialog" id="eventRequestDialog" aria-labelledby="eventDialogTitle">
+    <form id="eventRequestForm" class="event-dialog-form">
+      <div class="event-dialog-heading"><div><span class="eyebrow">EVENT QUOTE REQUEST</span><h2 id="eventDialogTitle">Tell us about your day.</h2><p id="eventPackageSummary"></p></div><button type="button" class="event-dialog-close" data-close-event-dialog aria-label="Close">×</button></div>
+      <input type="hidden" name="businessSlug" /><input type="hidden" name="branchId" /><input type="hidden" name="packageId" />
+      <label>Occasion<select name="occasionId" required></select></label>
+      <label>Where should the services happen?<select name="fulfillmentMode" required></select></label>
+      <div class="event-form-row"><label>Event date<input name="eventDate" type="date" required /></label><label>Event starts at<input name="eventStartTime" type="time" required /></label><label>Be ready by<input name="readyByTime" type="time" required /></label></div>
+      <label>Number of professionals you think you need<input name="requiredProfessionals" type="number" min="1" max="50" value="1" required /><small>It is okay if you are unsure. The provider can suggest a team in their quote.</small></label>
+      <fieldset class="event-participant-field"><legend>Who needs a service?</legend><p>Enter one role per line, such as Bride, Groom, Mother of the bride or Guest. Names are optional.</p><textarea name="participants" rows="4" maxlength="5000" placeholder="Bride&#10;Groom&#10;Mother of the bride" required></textarea></fieldset>
+      <fieldset class="event-service-field"><legend>Services you are interested in</legend><div id="eventPackageItems" class="event-package-item-options"></div><label>Anything else? <span class="event-optional">OPTIONAL</span><textarea name="additionalServices" rows="2" maxlength="1000" placeholder="Add one service per line"></textarea></label></fieldset>
+      <div id="eventVenueFields" class="event-venue-fields" hidden><h3>Event or home address</h3><p>Your exact address is encrypted and shown only to you and this provider after you send the request.</p><label>Full address<textarea name="venueAddress" rows="2" maxlength="500" placeholder="House, venue or hotel name and street" ></textarea></label><div class="event-form-row"><label>City<input name="venueCity" maxlength="100" placeholder="City" /></label><label>Latitude<input name="latitude" type="number" min="-90" max="90" step="any" placeholder="e.g. 26.9124" /></label><label>Longitude<input name="longitude" type="number" min="-180" max="180" step="any" placeholder="e.g. 75.7873" /></label></div><button type="button" class="event-location-button" id="useCurrentEventLocation">⌖ Use my current location</button></div>
+      <label>Additional requirements <span class="event-optional">OPTIONAL</span><textarea name="requirements" rows="3" maxlength="1500" placeholder="Timing, setup, accessibility or other details"></textarea></label>
+      <div id="eventAuthNote" class="event-auth-note"><strong>Sign in to send a request.</strong><span>Your FORME customer account keeps event requests and salon bookings together.</span><a href="/account">Sign in or create a customer account ↗</a></div>
+      <p class="event-form-message" id="eventFormMessage" role="status" aria-live="polite"></p>
+      <div class="event-dialog-actions"><button class="button button-outline" type="button" data-close-event-dialog>Cancel</button><button class="button button-dark" type="submit">Send quote request</button></div>
+      <small class="event-quote-disclaimer">Sending this request does not book or charge you. The event is confirmed only after you accept a quote and the provider confirms the team and schedule.</small>
+    </form>
+  </dialog>
+  <div id="eventToast" class="event-toast" role="status" aria-live="polite"></div>
+  <script src="/events.js" defer></script>
+</body>
+</html>

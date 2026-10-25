@@ -9,6 +9,7 @@ import { randomUUID, randomBytes, randomInt, timingSafeEqual, createHmac, scrypt
 import { fileURLToPath } from 'node:url';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { registerPlatformAdminRoutes } from './platform-admin.js';
+import { registerEventMarketplaceRoutes } from './event-marketplace.js';
 
 const app = express();
 const port = Number(process.env.PORT || 5050);
@@ -36,7 +37,7 @@ const initialState = (overrides = {}) => {
   return ({
   settings: { businessName: '', branchName: 'Main branch', city: '', country: 'India', currency: CURRENCY, timeZone: 'Asia/Kolkata', locale: 'en-IN', openingTime: '10:00', closingTime: '20:00', openDays: [2, 3, 4, 5, 6, 0], pointsPerRupee: 0.1, redemptionValue: 0.5, ...overrides },
   services: [], staff: [],
-  appointments: [], customers: [], orders: [], purchaseOrders: [], reviews: [], paymentRecords: [],
+  appointments: [], eventReservations: [], customers: [], orders: [], purchaseOrders: [], reviews: [], paymentRecords: [],
   products: [], movements: [],
   });
 };
@@ -199,7 +200,7 @@ async function mutateStateSafely(mutator, scope = scopeStorage.getStore()) {
       const stored = rows[0]?.payload;
       const base = initialState(overrides);
       const state = Array.isArray(stored) ? { ...base, appointments: stored } : { ...base, ...(stored || {}), settings: { ...base.settings, ...(stored?.settings || {}) } };
-      const result = await mutator(state);
+      const result = await mutator(state, { client, scope });
       if (result?.persist !== false) {
         await client.query(`INSERT INTO forme_documents (document_key, payload) VALUES ($1, $2::jsonb)
           ON CONFLICT (document_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`, [key, JSON.stringify(state)]);
@@ -218,7 +219,7 @@ async function mutateStateSafely(mutator, scope = scopeStorage.getStore()) {
   await previous;
   try {
     const state = await readStateFor(scope);
-    const result = await mutator(state);
+    const result = await mutator(state, { client: null, scope });
     if (result?.persist !== false) await writeStateFor(scope, state);
     return result;
   } finally {
@@ -253,6 +254,59 @@ function verifyToken(token) {
 }
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function slugify(value) { return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'salon'; }
+let marketplaceRegistrySnapshot = '';
+function registrySnapshot(platform) {
+  return JSON.stringify({
+    users: (platform.users || []).map(({ id, email, name, phone, active }) => [id, email, name, phone, active]),
+    customers: (platform.customerUsers || []).map(({ id, email, name, phone, active }) => [id, email, name, phone, active]),
+    tenants: (platform.tenants || []).map((tenant) => [tenant.id, tenant.slug, tenant.name, tenant.categoryId, tenant.subcategoryId, tenant.ownerUserId, tenant.reviewStatus, tenant.active, tenant.userIds, (tenant.branches || []).map((branch) => [branch.id, branch.name, branch.slug, branch.city, branch.country, branch.countryCode, branch.currency, branch.timeZone, branch.latitude, branch.longitude, branch.active])]),
+  });
+}
+async function syncMarketplaceRegistry(platform, transactionClient = null) {
+  if (!databasePool) return;
+  const currentSnapshot = registrySnapshot(platform);
+  if (!transactionClient && currentSnapshot === marketplaceRegistrySnapshot) return;
+  await ensureDatabase();
+  const client = transactionClient || await databasePool.connect();
+  try {
+    if (!transactionClient) { await client.query('BEGIN'); await client.query('SELECT pg_advisory_xact_lock($1)', [784215904]); }
+    for (const account of platform.users || []) {
+      if (!account?.id || !account.email) continue;
+      await client.query(`INSERT INTO marketplace_accounts (id,account_type,email,display_name,phone,active)
+        VALUES ($1,'partner',$2,$3,$4,$5) ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email,display_name=EXCLUDED.display_name,phone=EXCLUDED.phone,active=EXCLUDED.active,updated_at=NOW()`,
+      [account.id, normalizeEmail(account.email), String(account.name || '').slice(0, 120), String(account.phone || ''), account.active !== false]);
+    }
+    for (const account of platform.customerUsers || []) {
+      if (!account?.id || !account.email) continue;
+      await client.query(`INSERT INTO marketplace_accounts (id,account_type,email,display_name,phone,active)
+        VALUES ($1,'customer',$2,$3,$4,$5) ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email,display_name=EXCLUDED.display_name,phone=EXCLUDED.phone,active=EXCLUDED.active,updated_at=NOW()`,
+      [account.id, normalizeEmail(account.email), String(account.name || '').slice(0, 120), String(account.phone || ''), account.active !== false]);
+    }
+    for (const tenant of platform.tenants || []) {
+      if (!tenant?.id || !tenant.slug || !tenant.name) continue;
+      const categoryResult = await client.query('SELECT id FROM marketplace_categories WHERE id=$1', [tenant.categoryId || 'hair-salon']);
+      const subcategoryResult = tenant.subcategoryId ? await client.query('SELECT id FROM marketplace_subcategories WHERE id=$1 AND category_id=$2', [tenant.subcategoryId, tenant.categoryId || 'hair-salon']) : { rowCount: 0 };
+      await client.query(`INSERT INTO marketplace_businesses (id,slug,name,category_id,subcategory_id,owner_account_id,review_status,active)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET slug=EXCLUDED.slug,name=EXCLUDED.name,category_id=EXCLUDED.category_id,subcategory_id=EXCLUDED.subcategory_id,owner_account_id=EXCLUDED.owner_account_id,review_status=EXCLUDED.review_status,active=EXCLUDED.active,updated_at=NOW()`,
+      [tenant.id, tenant.slug, tenant.name, categoryResult.rowCount ? tenant.categoryId || 'hair-salon' : null, subcategoryResult.rowCount ? tenant.subcategoryId : null, tenant.ownerUserId || null, tenant.reviewStatus || 'approved', tenant.active !== false]);
+      for (const userId of tenant.userIds || []) {
+        await client.query(`INSERT INTO marketplace_business_memberships (business_id,account_id,role,active)
+          VALUES ($1,$2,$3,TRUE) ON CONFLICT (business_id,account_id) DO UPDATE SET role=EXCLUDED.role,active=TRUE`,
+        [tenant.id, userId, tenant.ownerUserId === userId ? 'owner' : 'manager']);
+      }
+      for (const branch of tenant.branches || []) {
+        if (!branch?.id || !branch.slug || !branch.name) continue;
+        await client.query(`INSERT INTO marketplace_branches (id,business_id,name,slug,city,country,country_code,currency,time_zone,latitude,longitude,active)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (id) DO UPDATE SET business_id=EXCLUDED.business_id,name=EXCLUDED.name,slug=EXCLUDED.slug,city=EXCLUDED.city,country=EXCLUDED.country,country_code=EXCLUDED.country_code,currency=EXCLUDED.currency,time_zone=EXCLUDED.time_zone,latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,active=EXCLUDED.active,updated_at=NOW()`,
+        [branch.id, tenant.id, branch.name, branch.slug, String(branch.city || ''), String(branch.country || ''), String(branch.countryCode || ''), /^[A-Z]{3}$/.test(branch.currency || '') ? branch.currency : 'INR', branch.timeZone || 'Asia/Kolkata', Number.isFinite(branch.latitude) ? branch.latitude : null, Number.isFinite(branch.longitude) ? branch.longitude : null, branch.active !== false]);
+      }
+    }
+    if (!transactionClient) { await client.query('COMMIT'); marketplaceRegistrySnapshot = currentSnapshot; }
+  } catch (error) {
+    if (!transactionClient) await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally { if (!transactionClient) client.release(); }
+}
 async function writePlatform(platform) {
   if (databasePool) {
     await ensureDatabase(); const client = await databasePool.connect();
@@ -268,7 +322,9 @@ async function writePlatform(platform) {
       }
       await client.query(`INSERT INTO forme_documents (document_key,payload) VALUES ('platform',$1::jsonb)
         ON CONFLICT (document_key) DO UPDATE SET payload=EXCLUDED.payload,updated_at=NOW()`, [JSON.stringify(platform)]);
+      await syncMarketplaceRegistry(platform, client);
       await client.query('COMMIT');
+      marketplaceRegistrySnapshot = registrySnapshot(platform);
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
     finally { client.release(); }
     return;
@@ -286,6 +342,7 @@ async function readPlatform() {
     platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.expiresAt > now);
     platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
     if (challengeCount !== platform.registrationChallenges.length || historyCount !== platform.otpSendHistory.length) await writePlatform(platform);
+    else await syncMarketplaceRegistry(platform);
     return platform;
   }
   try {
@@ -566,12 +623,14 @@ function availableStaffForSlot(state, date, time, service, excludeIds = []) {
   if (!state.settings.openDays.includes(weekday) || start < minutes(state.settings.openingTime) || end > minutes(state.settings.closingTime)) return [];
   return state.staff.filter((staff) => {
     if (!staff.active || !staff.days.includes(weekday) || start < minutes(staff.start) || end > minutes(staff.end)) return false;
-    return !state.appointments.some((item) => {
+    const appointmentConflict = state.appointments.some((item) => {
       if (excludeIds.includes(item.id) || item.status === 'cancelled' || (item.status === 'awaiting-payment' && item.paymentExpiresAt && new Date(item.paymentExpiresAt) < new Date()) || item.staffId !== staff.id || item.date !== date) return false;
       const otherStart = minutes(item.time);
       const otherEnd = otherStart + Number(item.minutes || 30);
       return start < otherEnd && otherStart < end;
     });
+    if (appointmentConflict) return false;
+    return !(state.eventReservations || []).some((item) => item.status !== 'released' && item.staffId === staff.id && item.date === date && start < minutes(item.endTime) && minutes(item.startTime) < end);
   });
 }
 function slotAvailable(state, date, time, service, staffId, excludeId = null) {
@@ -814,9 +873,11 @@ app.post('/api/auth/create-organization', async (req, res, next) => {
 });
 registerPlatformAdminRoutes(app, { databasePool, ensureDatabase, sessionSecret, readPlatform, sendEmail });
 app.use('/api', async (req, res, next) => {
-  if (req.path === '/health' || req.path.startsWith('/auth/') || req.path === '/public/salons') return next();
+  if (req.path === '/health' || req.path.startsWith('/auth/')) return next();
   try {
     const platform = await readPlatform();
+    if (req.path === '/public/salons') return scopeStorage.run({ platform }, next);
+    if (req.path.startsWith('/public/events/') || req.path.startsWith('/events/') || req.path === '/customer/events') return scopeStorage.run({ platform }, next);
     if (req.path.startsWith('/admin/')) {
       const auth = verifyToken(req.get('x-session-token'));
       if (auth?.type !== 'session') return res.status(401).json({ error: 'Please sign in to a salon workspace.' });
@@ -1017,6 +1078,7 @@ app.patch('/api/booking/:reference', async (req, res, next) => {
 });
 
 app.use('/api/admin', requireAdmin);
+registerEventMarketplaceRoutes(app, { databasePool, ensureDatabase, scopeStorage, readPlatform, customerFromRequest, mutateStateSafely, readStateFor, distanceKm, wallTimeInZone, minutes, weekdayFromDate, sessionSecret });
 app.get('/api/admin/branches', async (_req, res) => { const { tenant, branch } = scopeStorage.getStore(); res.json({ currentBranchId: branch.id, branches: tenant.branches.filter((b) => b.active) }); });
 app.post('/api/admin/branches', async (req, res, next) => {
   try {
@@ -1202,6 +1264,7 @@ app.get('/api/admin/ics/:id', async (req, res, next) => {
   try { const s = await readState(); const a = s.appointments.find((x) => x.id === req.params.id); if (!a) return res.status(404).end(); const date = a.date.replaceAll('-', ''); const time = a.time.replace(':', '') + '00'; const end = minutes(a.time) + a.minutes; const endTime = `${String(Math.floor(end / 60)).padStart(2, '0')}${String(end % 60).padStart(2, '0')}00`; res.type('text/calendar').attachment(`booking-${a.reference}.ics`).send(`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//FORME//Barber Studio//EN\r\nBEGIN:VEVENT\r\nUID:${a.id}@forme.local\r\nDTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}\r\nDTSTART:${date}T${time}\r\nDTEND:${date}T${endTime}\r\nSUMMARY:${a.serviceName} at FORME\r\nDESCRIPTION:Booking ${a.reference} with ${a.staffName}\r\nEND:VEVENT\r\nEND:VCALENDAR`); } catch (e) { next(e); }
 });
 
+app.get('/events', (_req, res) => res.sendFile(path.join(clientDir, 'events.html')));
 app.get('/platform-admin', (_req, res) => { res.set({ 'Content-Security-Policy': "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'", 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' }); res.sendFile(path.join(clientDir, 'platform-admin.html')); });
 app.get('*', (req, res, next) => { if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'API endpoint not found.' }); if (path.extname(req.path)) return next(); if (req.accepts('html')) return res.sendFile(path.join(clientDir, 'index.html')); next(); });
 

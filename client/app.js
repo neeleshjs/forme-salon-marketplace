@@ -531,12 +531,12 @@ $('#workspaceBack').addEventListener('click', () => {
 $('#orgSelector').addEventListener('change',()=>{const org=organizations.find(o=>o.id===$('#orgSelector').value);if(org?.branches[0])changeWorkspace(org.id,org.branches[0].id);});$('#branchSelector').addEventListener('change',()=>changeWorkspace($('#orgSelector').value,$('#branchSelector').value));
 $('#addOrganization').addEventListener('click',()=>openAdmin(true));
 function enterDashboard() { $('#adminGate').hidden = true; $('#dashboard').hidden = false; showView('overview'); }
-const titles = { overview: "Today\u0027s overview", appointments: 'Appointments', pos: 'Billing', customers: 'Customers', inventory: 'Products and stock', reports: 'Sales reports', team: 'Team and working hours', settings: 'Salon settings' };
+const titles = { overview: "Today\u0027s overview", appointments: 'Appointments', events: 'Weddings and events', pos: 'Billing', customers: 'Customers', inventory: 'Products and stock', reports: 'Sales reports', team: 'Team and working hours', settings: 'Salon settings' };
 function showView(view) {
   $$('.dash-view').forEach((node) => { node.hidden = node.id !== `view-${view}`; });
   $$('.dash-nav button').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
   $('#viewTitle').textContent = titles[view] || 'Salon dashboard';
-  const loaders = { overview: loadOverview, appointments: loadAppointments, pos: loadPos, customers: loadCustomers, inventory: loadInventory, reports: loadReports, team: loadTeam, settings: loadSettings };
+  const loaders = { overview: loadOverview, appointments: loadAppointments, events: () => window.loadPartnerEventWorkspace?.(), pos: loadPos, customers: loadCustomers, inventory: loadInventory, reports: loadReports, team: loadTeam, settings: loadSettings };
   loaders[view]?.().catch((error) => notify(error.message, true));
 }
 $$('.dash-nav button').forEach((button) => button.addEventListener('click', () => navigate(`/studio/${button.dataset.view}`)));
