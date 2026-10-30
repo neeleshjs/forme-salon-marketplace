@@ -246,7 +246,80 @@ export function registerPlatformAdminRoutes(app, { databasePool, ensureDatabase,
     catch (error) { next(error); }
   });
   router.get('/overview', roles('owner', 'reviewer', 'support'), async (_req, res, next) => {
-    try { const platform = await readPlatform(); const tenants = platform.tenants || []; const { rows: categoryRows } = await query('SELECT COUNT(*)::int AS count FROM marketplace_categories WHERE active=TRUE'); res.json({ businesses: tenants.length, pending: tenants.filter((tenant) => reviewStatus(tenant) === 'pending_review').length, approved: tenants.filter((tenant) => reviewStatus(tenant) === 'approved').length, rejected: tenants.filter((tenant) => reviewStatus(tenant) === 'rejected').length, suspended: tenants.filter((tenant) => reviewStatus(tenant) === 'suspended').length, categories: categoryRows[0].count, adminRole: _req.platformAdmin.role }); }
+    try {
+      const platform = await readPlatform();
+      const tenants = platform.tenants || [];
+      const branches = tenants.filter((tenant) => tenant.active !== false && reviewStatus(tenant) === 'approved').flatMap((tenant) => (tenant.branches || []).filter((branch) => branch.active !== false).map((branch) => ({
+        key: branch.isDefault ? 'studio:default' : `studio:${tenant.id}:${branch.id}`,
+        currency: String(branch.currency || 'INR').toUpperCase(),
+      })));
+      const documentKeys = [...new Set(branches.map((branch) => branch.key))];
+      const [categoryResult, stateResult, eventResult] = await Promise.all([
+        query('SELECT COUNT(*)::int AS count FROM marketplace_categories WHERE active=TRUE'),
+        query(`SELECT document_key, payload->'settings'->>'currency' AS currency,
+          COALESCE((SELECT jsonb_agg(jsonb_build_object('groupId', COALESCE(item->>'groupId', item->>'id'), 'status', COALESCE(item->>'status', 'unknown')))
+            FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload)='array' THEN payload WHEN jsonb_typeof(payload->'appointments')='array' THEN payload->'appointments' ELSE '[]'::jsonb END) item), '[]'::jsonb) AS appointments,
+          COALESCE((SELECT COUNT(*)::int FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'staff')='array' THEN payload->'staff' ELSE '[]'::jsonb END) item WHERE item->>'active'='true'), 0) AS active_staff,
+          COALESCE((SELECT jsonb_agg(jsonb_build_object('total', item->'total')) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'orders')='array' THEN payload->'orders' ELSE '[]'::jsonb END) item WHERE item->>'paymentStatus'='paid'), '[]'::jsonb) AS paid_orders,
+          COALESCE((SELECT jsonb_agg(jsonb_build_object('amount', item->'amount', 'currency', item->'currency')) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'paymentRecords')='array' THEN payload->'paymentRecords' ELSE '[]'::jsonb END) item WHERE item->>'provider'='razorpay' AND item->>'status'='captured'), '[]'::jsonb) AS captured_advances
+          FROM forme_documents WHERE document_key = ANY($1::text[])`, [documentKeys]),
+        query(`SELECT
+          (SELECT COUNT(*)::int FROM event_packages p JOIN marketplace_businesses b ON b.id=p.business_id WHERE p.active=TRUE AND b.active=TRUE AND b.review_status='approved') AS active_packages,
+          (SELECT COUNT(*)::int FROM event_quote_requests) AS requests,
+          (SELECT COUNT(*)::int FROM event_quote_requests WHERE status IN ('quote_requested','quote_sent','change_requested','awaiting_deposit')) AS open_requests,
+          (SELECT COUNT(*)::int FROM event_quote_requests WHERE status='confirmed') AS confirmed_requests`),
+      ]);
+      const currencyForKey = new Map(branches.map((branch) => [branch.key, branch.currency]));
+      const bookingGroups = new Map();
+      const salesByCurrency = new Map();
+      const advancesByCurrency = new Map();
+      let activeStaffProfiles = 0;
+      for (const row of stateResult.rows) {
+        const currency = [row.currency, currencyForKey.get(row.document_key), 'INR'].map((value) => String(value || '').toUpperCase()).find((value) => /^[A-Z]{3}$/.test(value));
+        activeStaffProfiles += Number(row.active_staff || 0);
+        for (const appointment of row.appointments || []) {
+          const groupId = String(appointment.groupId || appointment.id || '');
+          if (groupId) bookingGroups.set(groupId, String(appointment.status || 'unknown'));
+        }
+        for (const order of row.paid_orders || []) {
+          const total = Number(order.total);
+          if (currency && Number.isFinite(total) && total >= 0) salesByCurrency.set(currency, (salesByCurrency.get(currency) || 0) + total);
+        }
+        for (const payment of row.captured_advances || []) {
+          const amount = Number(payment.amount);
+          const paymentCurrency = String(payment.currency || currency || '').toUpperCase();
+          if (Number.isFinite(amount) && amount >= 0 && /^[A-Z]{3}$/.test(paymentCurrency)) advancesByCurrency.set(paymentCurrency, (advancesByCurrency.get(paymentCurrency) || 0) + amount);
+        }
+      }
+      const bookingStatusCounts = {};
+      for (const status of bookingGroups.values()) bookingStatusCounts[status] = (bookingStatusCounts[status] || 0) + 1;
+      const event = eventResult.rows[0] || {};
+      const amountRows = (totals) => [...totals].map(([currency, amount]) => ({ currency, amount: Math.round(amount * 100) / 100 })).sort((a, b) => a.currency.localeCompare(b.currency));
+      res.json({
+        businesses: tenants.length,
+        pending: tenants.filter((tenant) => reviewStatus(tenant) === 'pending_review').length,
+        approved: tenants.filter((tenant) => reviewStatus(tenant) === 'approved').length,
+        rejected: tenants.filter((tenant) => reviewStatus(tenant) === 'rejected').length,
+        suspended: tenants.filter((tenant) => reviewStatus(tenant) === 'suspended').length,
+        categories: categoryResult.rows[0].count,
+        adminRole: _req.platformAdmin.role,
+        operations: {
+          activeBranches: branches.length,
+          customerAccounts: (platform.customerUsers || []).filter((user) => user.active !== false).length,
+          activeStaffProfiles,
+          bookingGroups: bookingGroups.size,
+          bookingStatusCounts,
+          partnerSalesByCurrency: _req.platformAdmin.role === 'owner' ? amountRows(salesByCurrency) : null,
+          capturedAdvancesByCurrency: _req.platformAdmin.role === 'owner' ? amountRows(advancesByCurrency) : null,
+          events: {
+            activePackages: Number(event.active_packages || 0),
+            requests: Number(event.requests || 0),
+            openRequests: Number(event.open_requests || 0),
+            confirmedRequests: Number(event.confirmed_requests || 0),
+          },
+        },
+      });
+    }
     catch (error) { next(error); }
   });
   router.get('/businesses', roles('owner', 'reviewer', 'support'), async (req, res, next) => {
