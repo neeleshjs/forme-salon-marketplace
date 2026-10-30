@@ -5,9 +5,10 @@ import pg from 'pg';
 import nodemailer from 'nodemailer';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { randomUUID, randomBytes, randomInt, timingSafeEqual, createHmac, scryptSync } from 'node:crypto';
+import { randomUUID, randomBytes, randomInt, timingSafeEqual, createHmac, scrypt as scryptCallback } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { promisify } from 'node:util';
 import { registerPlatformAdminRoutes } from './platform-admin.js';
 import { registerEventMarketplaceRoutes } from './event-marketplace.js';
 
@@ -20,16 +21,75 @@ const dataRoot = path.dirname(dataFile);
 const migrationDir = path.resolve(here, '../migrations');
 const businessCategoriesFile = path.resolve(here, '../config/business-categories.json');
 const { Pool } = pg;
+const scryptAsync = promisify(scryptCallback);
 const databasePool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, max: 5, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30000, allowExitOnIdle: true }) : null;
 let databaseSetup;
 const clientDir = path.resolve(here, '../../client');
-const sessionSecret = process.env.SESSION_SECRET || 'local-prototype-session-secret-change-before-deploy';
+const defaultSessionSecret = 'local-prototype-session-secret-change-before-deploy';
+const sessionSecret = process.env.SESSION_SECRET || defaultSessionSecret;
+if (process.env.NODE_ENV === 'production' && (sessionSecret === defaultSessionSecret || sessionSecret.length < 32)) {
+  throw new Error('Production requires a private SESSION_SECRET with at least 32 characters.');
+}
 const scopeStorage = new AsyncLocalStorage();
 const SLOT_STEP = 30;
 const CURRENCY = 'INR';
+const rateLimitBuckets = new Map();
+
+function requestRateLimit(name, maxRequests, windowMs, identity = (req) => req.ip || req.socket?.remoteAddress || 'unknown') {
+  return (req, res, next) => {
+    const bucketKey = createHmac('sha256', sessionSecret).update(`${name}:${identity(req) || 'unknown'}`).digest('hex');
+    const now = Date.now();
+    let bucket = rateLimitBuckets.get(bucketKey);
+    if (!bucket || bucket.resetAt <= now) {
+      bucket = { count: 0, resetAt: now + windowMs };
+      rateLimitBuckets.set(bucketKey, bucket);
+    }
+    bucket.count += 1;
+    if (bucket.count > maxRequests) {
+      const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+      res.set('Retry-After', String(retryAfter));
+      res.set('Cache-Control', 'no-store');
+      return res.status(429).json({ error: `Too many requests. Try again in ${retryAfter} seconds.` });
+    }
+    if (rateLimitBuckets.size > 10000) {
+      for (const [key, entry] of rateLimitBuckets) {
+        if (entry.resetAt <= now || rateLimitBuckets.size > 10000) rateLimitBuckets.delete(key);
+        if (rateLimitBuckets.size <= 8000) break;
+      }
+    }
+    next();
+  };
+}
+
+const loginNetworkRateLimit = requestRateLimit('login-network', 100, 15 * 60 * 1000);
+const partnerLoginRateLimit = requestRateLimit('partner-login', 10, 15 * 60 * 1000, (req) => `${req.ip || req.socket?.remoteAddress || 'unknown'}:${normalizeEmail(req.body?.email)}`);
+const customerLoginRateLimit = requestRateLimit('customer-login', 10, 15 * 60 * 1000, (req) => `${req.ip || req.socket?.remoteAddress || 'unknown'}:${normalizeEmail(req.body?.email)}`);
+const registrationRateLimit = requestRateLimit('registration', 8, 15 * 60 * 1000);
+const registrationVerifyRateLimit = requestRateLimit('registration-verify', 20, 15 * 60 * 1000);
+const passwordResetRateLimit = requestRateLimit('password-reset', 10, 15 * 60 * 1000);
+const passwordResetVerifyRateLimit = requestRateLimit('password-reset-verify', 20, 15 * 60 * 1000);
+const bookingLookupRateLimit = requestRateLimit('booking-lookup', 20, 15 * 60 * 1000);
+const bookingManageRateLimit = requestRateLimit('booking-manage', 20, 15 * 60 * 1000);
+const bookingCreateRateLimit = requestRateLimit('booking-create', 20, 15 * 60 * 1000);
+const paymentRateLimit = requestRateLimit('payment', 20, 15 * 60 * 1000);
+const reviewRateLimit = requestRateLimit('review', 30, 15 * 60 * 1000);
+const eventRequestRateLimit = requestRateLimit('event-request', 10, 15 * 60 * 1000);
+const eventActionRateLimit = requestRateLimit('event-action', 20, 15 * 60 * 1000);
+const platformAdminLoginRateLimit = requestRateLimit('platform-admin-login', 20, 15 * 60 * 1000);
+const platformAdminBootstrapRateLimit = requestRateLimit('platform-admin-bootstrap', 5, 15 * 60 * 1000);
 
 app.disable('x-powered-by');
-app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
+app.set('trust proxy', 1);
+const allowedOrigins = new Set(String(process.env.ALLOWED_ORIGIN || '').split(',').map((origin) => origin.trim()).filter(Boolean));
+app.use(cors({ origin: (origin, callback) => callback(null, Boolean(origin && allowedOrigins.has(origin))) }));
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
+  if (req.secure) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
 app.use(express.json({ limit: '64kb', verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
 app.use(express.static(clientDir));
 
@@ -184,8 +244,6 @@ async function writeStateFor(scope, state) {
   await fs.rename(temp, file);
 }
 
-function writeState(state) { return writeStateFor(scopeStorage.getStore(), state); }
-
 const stateMutationQueues = new Map();
 async function mutateStateSafely(mutator, scope = scopeStorage.getStore()) {
   const key = stateDocumentKey(scope);
@@ -228,13 +286,17 @@ async function mutateStateSafely(mutator, scope = scopeStorage.getStore()) {
   }
 }
 
-function hashPassword(password, salt = randomBytes(16).toString('hex')) {
-  return { salt, hash: scryptSync(password, salt, 64).toString('hex') };
+async function hashPassword(password, salt = randomBytes(16).toString('hex')) {
+  const derived = await scryptAsync(password, salt, 64, { maxmem: 64 * 1024 * 1024 });
+  return { salt, hash: derived.toString('hex') };
 }
-function passwordMatches(password, user) {
-  const actual = scryptSync(password, user.passwordSalt, 64);
+async function passwordMatches(password, user) {
+  const actual = await scryptAsync(password, user.passwordSalt, 64, { maxmem: 64 * 1024 * 1024 });
   const expected = Buffer.from(user.passwordHash, 'hex');
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+async function performDummyPasswordCheck(password) {
+  await scryptAsync(password, 'forme-public-auth-dummy-salt', 64, { maxmem: 64 * 1024 * 1024 });
 }
 function signToken(payload) {
   const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -255,6 +317,74 @@ function verifyToken(token) {
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function slugify(value) { return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'salon'; }
 let marketplaceRegistrySnapshot = '';
+const platformSnapshots = new WeakMap();
+let platformFileWriteTail = Promise.resolve();
+function platformValuesEqual(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
+function mergePlatformValue(base, local, latest, field = '') {
+  if (platformValuesEqual(local, base)) return structuredClone(latest);
+  if (platformValuesEqual(latest, base) || platformValuesEqual(local, latest)) return structuredClone(local);
+  if (field === 'attempts' && [base, local, latest].every(Number.isSafeInteger)) return Math.max(0, base + (local - base) + (latest - base));
+  if (Array.isArray(base) || Array.isArray(local) || Array.isArray(latest)) {
+    const baseRows = Array.isArray(base) ? base : [];
+    const localRows = Array.isArray(local) ? local : [];
+    const latestRows = Array.isArray(latest) ? latest : [];
+    const allRows = [...baseRows, ...localRows, ...latestRows];
+    if (allRows.every((row) => row && typeof row === 'object' && !Array.isArray(row) && typeof row.id === 'string')) {
+      const before = new Map(baseRows.map((row) => [row.id, row]));
+      const ours = new Map(localRows.map((row) => [row.id, row]));
+      const theirs = new Map(latestRows.map((row) => [row.id, row]));
+      const ids = new Set([...before.keys(), ...ours.keys(), ...theirs.keys()]);
+      const merged = [];
+      for (const id of ids) {
+        const oldRow = before.get(id); const localRow = ours.get(id); const latestRow = theirs.get(id);
+        if (oldRow && (!localRow || !latestRow)) {
+          if (!localRow && !latestRow) continue;
+          if (!localRow && platformValuesEqual(latestRow, oldRow)) continue;
+          if (!latestRow && platformValuesEqual(localRow, oldRow)) continue;
+          // A delete always wins against an edit to the same one-time challenge.
+          continue;
+        }
+        if (!oldRow) merged.push(structuredClone(localRow || latestRow));
+        else merged.push(mergePlatformValue(oldRow, localRow, latestRow));
+      }
+      return merged;
+    }
+    // Primitive lists such as tenantIds and userIds merge additions and removals.
+    const unique = (items) => [...new Set(items)];
+    const oldSet = new Set(baseRows); const localSet = new Set(localRows); const latestSet = new Set(latestRows);
+    return unique([...latestRows.filter((item) => !oldSet.has(item) || localSet.has(item)), ...localRows.filter((item) => !oldSet.has(item) && !latestSet.has(item))]);
+  }
+  if (base && local && latest && [base, local, latest].every((value) => typeof value === 'object')) {
+    const merged = {};
+    for (const key of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(latest)])) {
+      const oldValue = base[key]; const localValue = local[key]; const latestValue = latest[key];
+      if (!(key in local) && !(key in latest)) continue;
+      if (!(key in local)) { if (platformValuesEqual(latestValue, oldValue)) continue; merged[key] = structuredClone(latestValue); continue; }
+      if (!(key in latest)) { if (platformValuesEqual(localValue, oldValue)) continue; merged[key] = structuredClone(localValue); continue; }
+      merged[key] = mergePlatformValue(oldValue, localValue, latestValue, key);
+    }
+    return merged;
+  }
+  // For conflicting scalar edits, preserve the value already committed by the other writer.
+  return structuredClone(latest);
+}
+function mergePlatformChanges(base, local, latest) {
+  const merged = mergePlatformValue(base, local, latest);
+  for (const key of ['users', 'customerUsers', 'tenants', 'registrationChallenges', 'passwordResetChallenges', 'otpSendHistory']) merged[key] ||= [];
+  const uniqueAccounts = new Set();
+  for (const [kind, accounts] of [['partner', merged.users], ['customer', merged.customerUsers]]) {
+    for (const account of accounts) {
+      const identity = `${kind}:${normalizeEmail(account.email)}`;
+      if (!account.email || uniqueAccounts.has(identity)) throw Object.assign(new Error('An account already exists for this email. Please sign in.'), { statusCode: 409 });
+      uniqueAccounts.add(identity);
+    }
+  }
+  return merged;
+}
+function replacePlatformObject(target, source) {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, source);
+}
 function registrySnapshot(platform) {
   return JSON.stringify({
     users: (platform.users || []).map(({ id, email, name, phone, active }) => [id, email, name, phone, active]),
@@ -308,36 +438,55 @@ async function syncMarketplaceRegistry(platform, transactionClient = null) {
   } finally { if (!transactionClient) client.release(); }
 }
 async function writePlatform(platform) {
+  const snapshot = platformSnapshots.get(platform) || { users: [], customerUsers: [], tenants: [], registrationChallenges: [], passwordResetChallenges: [], otpSendHistory: [] };
   if (databasePool) {
     await ensureDatabase(); const client = await databasePool.connect();
     try {
       await client.query('BEGIN'); await client.query('SELECT pg_advisory_xact_lock($1)', [784215903]);
       const { rows } = await client.query("SELECT payload FROM forme_documents WHERE document_key='platform' FOR UPDATE");
-      const latestTenants = new Map((rows[0]?.payload?.tenants || []).map((tenant) => [tenant.id, tenant]));
-      for (const tenant of platform.tenants || []) {
+      const latest = rows[0]?.payload || { users: [], customerUsers: [], tenants: [], registrationChallenges: [], passwordResetChallenges: [], otpSendHistory: [] };
+      const merged = mergePlatformChanges(snapshot, platform, latest);
+      const latestTenants = new Map((latest.tenants || []).map((tenant) => [tenant.id, tenant]));
+      for (const tenant of merged.tenants || []) {
         const latest = latestTenants.get(tenant.id);
         if (latest?.reviewDecisionAt && (!tenant.reviewDecisionAt || latest.reviewDecisionAt > tenant.reviewDecisionAt)) {
           tenant.reviewStatus = latest.reviewStatus; tenant.reviewNote = latest.reviewNote || ''; tenant.reviewDecisionAt = latest.reviewDecisionAt; tenant.reviewDecisionBy = latest.reviewDecisionBy;
         }
       }
       await client.query(`INSERT INTO forme_documents (document_key,payload) VALUES ('platform',$1::jsonb)
-        ON CONFLICT (document_key) DO UPDATE SET payload=EXCLUDED.payload,updated_at=NOW()`, [JSON.stringify(platform)]);
-      await syncMarketplaceRegistry(platform, client);
+        ON CONFLICT (document_key) DO UPDATE SET payload=EXCLUDED.payload,updated_at=NOW()`, [JSON.stringify(merged)]);
+      await syncMarketplaceRegistry(merged, client);
       await client.query('COMMIT');
-      marketplaceRegistrySnapshot = registrySnapshot(platform);
+      replacePlatformObject(platform, merged);
+      platformSnapshots.set(platform, structuredClone(merged));
+      marketplaceRegistrySnapshot = registrySnapshot(merged);
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
     finally { client.release(); }
     return;
   }
-  await fs.mkdir(path.dirname(platformFile), { recursive: true });
-  const temp = `${platformFile}.tmp`;
-  await fs.writeFile(temp, JSON.stringify(platform, null, 2), 'utf8');
-  await fs.rename(temp, platformFile);
+  const previous = platformFileWriteTail;
+  let release;
+  platformFileWriteTail = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    let latest;
+    try { latest = JSON.parse(await fs.readFile(platformFile, 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; latest = snapshot; }
+    const merged = mergePlatformChanges(snapshot, platform, latest);
+    await fs.mkdir(path.dirname(platformFile), { recursive: true });
+    const temp = `${platformFile}.${randomUUID()}.tmp`;
+    await fs.writeFile(temp, JSON.stringify(merged, null, 2), 'utf8');
+    await fs.rename(temp, platformFile);
+    replacePlatformObject(platform, merged);
+    platformSnapshots.set(platform, structuredClone(merged));
+  } finally { release(); }
 }
 async function readPlatform() {
   if (databasePool) {
     const platform = await readDocument('platform') ?? await createDocumentIfMissing('platform', { users: [], customerUsers: [], tenants: [], registrationChallenges: [], passwordResetChallenges: [], otpSendHistory: [] });
     platform.users ||= []; platform.customerUsers ||= []; platform.tenants ||= []; platform.registrationChallenges ||= []; platform.passwordResetChallenges ||= []; platform.otpSendHistory ||= [];
+    platform.otpSendHistory = platform.otpSendHistory.map((item) => item.id ? item : { ...item, id: randomUUID() });
+    platformSnapshots.set(platform, structuredClone(platform));
     const now = Date.now(); const challengeCount = platform.registrationChallenges.length; const historyCount = platform.otpSendHistory.length;
     platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.expiresAt > now);
     platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
@@ -346,7 +495,9 @@ async function readPlatform() {
     return platform;
   }
   try {
-    const platform = JSON.parse(await fs.readFile(platformFile, 'utf8')); platform.customerUsers ||= []; platform.registrationChallenges ||= []; platform.passwordResetChallenges ||= []; platform.otpSendHistory ||= [];
+    const platform = JSON.parse(await fs.readFile(platformFile, 'utf8')); platform.users ||= []; platform.customerUsers ||= []; platform.tenants ||= []; platform.registrationChallenges ||= []; platform.passwordResetChallenges ||= []; platform.otpSendHistory ||= [];
+    platform.otpSendHistory = platform.otpSendHistory.map((item) => item.id ? item : { ...item, id: randomUUID() });
+    platformSnapshots.set(platform, structuredClone(platform));
     const now = Date.now(); const challengeCount = platform.registrationChallenges.length; const historyCount = platform.otpSendHistory.length;
     platform.registrationChallenges = platform.registrationChallenges.filter((item) => item.expiresAt > now);
     platform.otpSendHistory = platform.otpSendHistory.filter((item) => now - item.createdAt < 60 * 60 * 1000);
@@ -356,11 +507,13 @@ async function readPlatform() {
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
     const emptyPlatform = { users: [], customerUsers: [], tenants: [], registrationChallenges: [], passwordResetChallenges: [], otpSendHistory: [] };
+    platformSnapshots.set(emptyPlatform, structuredClone(emptyPlatform));
     await writePlatform(emptyPlatform);
     return emptyPlatform;
   }
 }
 function tenantChoices(platform, user) {
+  if (!user || user.active === false) return [];
   return platform.tenants.filter((tenant) => tenant.active && user.tenantIds.includes(tenant.id)).map((tenant) => ({ id: tenant.id, slug: tenant.slug, name: tenant.name, categoryId: tenant.categoryId || 'hair-salon', categoryName: tenant.categoryName || 'Hair salon and unisex salon', subcategoryId: tenant.subcategoryId || null, subcategoryName: tenant.subcategoryName || null, reviewStatus: tenant.reviewStatus || 'approved', reviewNote: tenant.reviewNote || '', branches: tenant.branches.filter((branch) => branch.active).map(({ id, name, slug, city, country, currency, timeZone }) => ({ id, name, slug, city, country, currency, timeZone })) }));
 }
 function tenantWorkspace(tenant, branch) { return { tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, branchId: branch.id, branchName: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone, reviewStatus: tenant.reviewStatus || 'approved', reviewNote: tenant.reviewNote || '' }; }
@@ -419,6 +572,24 @@ function requireAdmin(req, res, next) {
 }
 
 function minutes(value) { const [h, m] = String(value || '').split(':').map(Number); return h * 60 + m; }
+function validDateString(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+function escapeCalendarText(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r\n|\r|\n/g, '\\n');
+}
+function validTimeString(value) {
+  if (typeof value !== 'string' || !/^\d{2}:\d{2}$/.test(value)) return false;
+  const [hour, minute] = value.split(':').map(Number);
+  return hour < 24 && minute < 60;
+}
+function validSlotStart(value, openingTime) {
+  if (!validTimeString(value) || !validTimeString(openingTime)) return false;
+  const offset = minutes(value) - minutes(openingTime);
+  return offset >= 0 && offset % SLOT_STEP === 0;
+}
 function priceFactor(currency) { return ({ INR: 1, USD: 0.12, EUR: 0.11, GBP: 0.095, AED: 0.44, SGD: 0.16, CAD: 0.17, AUD: 0.18 })[currency] || 0.1; }
 function dateKeyInZone(value = new Date(), timeZone = 'Etc/UTC') { const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(value); const p = Object.fromEntries(parts.map((x) => [x.type, x.value])); return `${p.year}-${p.month}-${p.day}`; }
 function wallTimeInZone(date, time, timeZone) {
@@ -537,7 +708,8 @@ async function startRegistrationVerification(platform, { purpose, email, phone, 
   platform.registrationChallenges.push(challengeRecord); platform.otpSendHistory.push(sendAttempt); await writePlatform(platform);
   try {
     await sendVerificationEmail(email, emailCode);
-    sendAttempt.delivered = true;
+    const persistedAttempt = platform.otpSendHistory.find((item) => item.id === sendAttempt.id);
+    if (persistedAttempt) persistedAttempt.delivered = true;
     await writePlatform(platform);
   } catch (error) {
     console.warn('Signup OTP delivery failed.', { channel: error.deliveryChannel || 'unknown', provider: error.emailProvider || null, providerStatus: error.providerStatus || null, providerCode: error.providerCode || null });
@@ -594,7 +766,7 @@ async function verifyPasswordReset(platform, { challengeId, accountType, emailCo
 async function completePasswordReset(platform, { challengeId, accountType, emailCode, password }) {
   const result = await verifyPasswordReset(platform, { challengeId, accountType, emailCode });
   if (result.error) return result;
-  const { user } = result; const credentials = hashPassword(password); const now = new Date().toISOString();
+  const { user } = result; const credentials = await hashPassword(password); const now = new Date().toISOString();
   user.passwordSalt = credentials.salt; user.passwordHash = credentials.hash; user.authVersion = accountAuthVersion(user) + 1; user.passwordUpdatedAt = now; user.emailVerifiedAt ||= now;
   platform.passwordResetChallenges = platform.passwordResetChallenges.filter((item) => !(item.accountType === accountType && item.email === user.email));
   await writePlatform(platform);
@@ -666,7 +838,7 @@ function confirmBookingGroup(appointments, { paymentStatus, paymentId = null } =
     appointment.paidAt = paidAt;
   }
 }
-function makeReference() { return randomBytes(4).toString('hex').toUpperCase(); }
+function makeReference() { return randomBytes(8).toString('hex').toUpperCase(); }
 
 app.get('/api/health', async (_req, res) => {
   try {
@@ -683,6 +855,7 @@ app.post('/api/payments/webhook', async (req, res, next) => {
     if (signature.length !== expected.length || !timingSafeEqual(signature, expected)) return res.status(400).json({ error: 'Invalid webhook signature.' });
     if (req.body?.event !== 'payment.captured') return res.json({ received: true });
     const entity = req.body?.payload?.payment?.entity; if (!entity?.order_id || !entity?.id) return res.status(400).json({ error: 'Payment event is missing its order or payment ID.' });
+    if (entity.status && entity.status !== 'captured') return res.status(400).json({ error: 'Payment event is not captured.' });
     const platform = await readPlatform();
     for (const tenant of platform.tenants) for (const branch of tenant.branches || []) {
       const scope = { tenant, branch };
@@ -692,15 +865,23 @@ app.post('/api/payments/webhook', async (req, res, next) => {
         if (entity.amount !== record.amountMinor || entity.currency !== record.currency) return { persist: false, found: true, invalidAmount: true };
         const appointmentIds = record.appointmentIds || [record.appointmentId];
         const appointments = state.appointments.filter((item) => appointmentIds.includes(item.id));
-        if (!appointments.length) return { persist: false, found: true, missingAppointments: true };
+        if (!appointments.length || appointments.length !== appointmentIds.length) return { persist: false, found: true, missingAppointments: true };
         if (record.status === 'captured' && record.paymentId === entity.id) return { persist: false, found: true };
+        const alreadyPaidByAnotherPayment = appointments.some((item) => item.paymentId && item.paymentId !== entity.id);
+        const bookingNoLongerPayable = appointments.some((item) => item.status !== 'awaiting-payment' || (item.paymentExpiresAt && new Date(item.paymentExpiresAt) <= new Date()));
+        if (record.status === 'captured' || alreadyPaidByAnotherPayment || bookingNoLongerPayable) {
+          record.status = 'duplicate-captured'; record.paymentId = entity.id; record.requiresRefundReview = true; record.refundReviewReason = 'A captured payment arrived after this booking was already paid, changed, or expired.'; record.capturedAt = new Date().toISOString();
+          return { found: true, duplicateCapture: true };
+        }
         record.status = 'captured'; record.paymentId = entity.id;
+        record.capturedAt = new Date().toISOString();
         confirmBookingGroup(appointments, { paymentStatus: 'deposit-paid', paymentId: entity.id });
         return { found: true };
       }, scope);
       if (!outcome.found) continue;
       if (outcome.invalidAmount) return res.status(400).json({ error: 'Captured payment amount does not match the booking deposit.' });
       if (outcome.missingAppointments) return res.status(404).json({ error: 'Payment booking was not found.' });
+      if (outcome.duplicateCapture) return res.json({ received: true, reviewRequired: true });
       return res.json({ received: true });
     }
     res.status(404).json({ error: 'No booking matches this payment order.' });
@@ -773,19 +954,19 @@ app.get('/api/public/salons', async (req, res, next) => {
     res.json(salons);
   } catch (e) { next(e); }
 });
-app.post('/api/customer/register', async (req, res, next) => {
+app.post('/api/customer/register', registrationRateLimit, async (req, res, next) => {
   try {
     const { name, email, phone, password } = req.body || {}; const normalized = normalizeEmail(email);
-    if (typeof name !== 'string' || name.trim().length < 2 || !/^\S+@\S+\.\S+$/.test(normalized) || !validPhone(String(phone || '')) || typeof password !== 'string' || password.length < 8) return res.status(400).json({ error: 'Enter your name, valid email, phone, and a password with at least 8 characters.' });
+    if (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 80 || normalized.length > 254 || !/^\S+@\S+\.\S+$/.test(normalized) || !validPhone(String(phone || '')) || typeof password !== 'string' || password.length < 8 || password.length > 128) return res.status(400).json({ error: 'Enter your name, valid email, phone, and a password between 8 and 128 characters.' });
     const platform = await readPlatform(); if (platform.customerUsers.some((user) => user.email === normalized)) return res.status(409).json({ error: 'An account already exists for this email. Please sign in.' });
     let contactPhone; try { contactPhone = normalizePhoneNumber(phone).e164; } catch (error) { return res.status(400).json({ error: error.message }); }
-    const credentials = hashPassword(password);
+    const credentials = await hashPassword(password);
     const result = await startRegistrationVerification(platform, { purpose: 'customer', email: normalized, phone: contactPhone, registration: { name: name.trim().slice(0, 80), email: normalized, phone: contactPhone, passwordSalt: credentials.salt, passwordHash: credentials.hash } });
     if (result.error) return res.status(result.status).json({ error: result.error });
     const { status, ...challenge } = result; res.status(202).json(challenge);
   } catch (e) { next(e); }
 });
-app.post('/api/customer/verify-registration', async (req, res, next) => {
+app.post('/api/customer/verify-registration', registrationVerifyRateLimit, async (req, res, next) => {
   try {
     const platform = await readPlatform(); const result = await verifyRegistrationCodes(platform, { challengeId: String(req.body?.challengeId || ''), purpose: 'customer', emailCode: String(req.body?.emailCode || '') });
     if (result.error) return res.status(400).json({ error: result.error });
@@ -797,24 +978,28 @@ app.post('/api/customer/verify-registration', async (req, res, next) => {
     res.status(201).json({ customerToken: makeCustomerSession(user), customer: { id: user.id, name: user.name, email: user.email, phone: user.phone } });
   } catch (e) { next(e); }
 });
-app.post('/api/customer/login', async (req, res, next) => {
+app.post('/api/customer/login', loginNetworkRateLimit, customerLoginRateLimit, async (req, res, next) => {
   try {
-    const platform = await readPlatform(); const user = platform.customerUsers.find((item) => item.email === normalizeEmail(req.body?.email) && item.active !== false);
-    if (!user || !passwordMatches(String(req.body?.password || ''), user)) return res.status(401).json({ error: 'Email or password is incorrect.' });
+    const password = String(req.body?.password || '');
+    const email = normalizeEmail(req.body?.email);
+    if (password.length > 128 || email.length > 254) return res.status(401).json({ error: 'Email or password is incorrect.' });
+    const platform = await readPlatform(); const user = platform.customerUsers.find((item) => item.email === email && item.active !== false);
+    if (!user) await performDummyPasswordCheck(password);
+    if (!user || !await passwordMatches(password, user)) return res.status(401).json({ error: 'Email or password is incorrect.' });
     res.json({ customerToken: makeCustomerSession(user), customer: { id: user.id, name: user.name, email: user.email, phone: user.phone } });
   } catch (e) { next(e); }
 });
-app.post('/api/customer/password-reset/start', async (req, res, next) => {
+app.post('/api/customer/password-reset/start', passwordResetRateLimit, async (req, res, next) => {
   try {
     const email = normalizeEmail(req.body?.email);
-    if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+    if (email.length > 254 || !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
     const platform = await readPlatform(); const result = await startPasswordReset(platform, { accountType: 'customer', email });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.status(202).json({ challengeId: result.challengeId, expiresInSeconds: 600, message: 'If an account matches that email, a password reset code has been sent.' });
     if (result.emailCode) sendPasswordResetEmail(email, result.emailCode).catch(() => console.warn('Password reset email delivery failed.'));
   } catch (e) { next(e); }
 });
-app.post('/api/customer/password-reset/complete', async (req, res, next) => {
+app.post('/api/customer/password-reset/complete', passwordResetVerifyRateLimit, async (req, res, next) => {
   try {
     const { challengeId, emailCode, password } = req.body || {};
     if (typeof password !== 'string' || password.length < 8 || password.length > 128) return res.status(400).json({ error: 'Choose a password between 8 and 128 characters.' });
@@ -827,10 +1012,10 @@ app.post('/api/customer/password-reset/complete', async (req, res, next) => {
 app.get('/api/customer/me', async (req, res, next) => {
   try { const platform = await readPlatform(); const user = customerFromRequest(req, platform); if (!user) return res.status(401).json({ error: 'Sign in to continue.' }); res.json({ customer: { id: user.id, name: user.name, email: user.email, phone: user.phone } }); } catch (e) { next(e); }
 });
-app.post('/api/auth/register', async (req, res, next) => {
+app.post('/api/auth/register', registrationRateLimit, async (req, res, next) => {
   try {
     const { name, email, phone, password } = req.body || {}; const normalized = normalizeEmail(email);
-    if (typeof name !== 'string' || name.trim().length < 2 || !/^\S+@\S+\.\S+$/.test(normalized) || !validPhone(String(phone || '')) || typeof password !== 'string' || password.length < 8) return res.status(400).json({ error: 'Enter your name, a valid email, phone number, and a password with at least 8 characters.' });
+    if (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 80 || normalized.length > 254 || !/^\S+@\S+\.\S+$/.test(normalized) || !validPhone(String(phone || '')) || typeof password !== 'string' || password.length < 8 || password.length > 128) return res.status(400).json({ error: 'Enter your name, a valid email, phone number, and a password between 8 and 128 characters.' });
     const details = req.body || {}; const businessName = String(details.businessName || '').trim(); const branchName = String(details.branchName || 'Main branch').trim(); const country = String(details.country || '').trim(); const currency = String(details.currency || 'USD').trim().toUpperCase(); const timeZone = String(details.timeZone || 'Etc/UTC').trim();
     if (businessName.length < 2 || branchName.length < 2 || !country || !/^[A-Z]{3}$/.test(currency)) return res.status(400).json({ error: 'Enter a business name, location, country, and three-letter currency.' });
     let category; try { category = await resolveBusinessCategory(details.categoryId || 'hair-salon', details.subcategoryId || ''); } catch (error) { return res.status(400).json({ error: error.message }); }
@@ -838,15 +1023,15 @@ app.post('/api/auth/register', async (req, res, next) => {
     catch { return res.status(400).json({ error: 'Enter a valid country, currency, time zone, and map pin.' }); }
     let contactPhone; try { contactPhone = normalizePhoneNumber(phone).e164; } catch (error) { return res.status(400).json({ error: error.message }); }
     const platform = await readPlatform(); const existing = platform.users.find((user) => user.email === normalized);
-    if (existing && !passwordMatches(password, existing)) return res.status(409).json({ error: 'This email already has an account. Sign in with its password to add another salon.' });
-    const credentials = existing ? { salt: existing.passwordSalt, hash: existing.passwordHash } : hashPassword(password);
+    if (existing && !await passwordMatches(password, existing)) return res.status(409).json({ error: 'This email already has an account. Sign in with its password to add another salon.' });
+    const credentials = existing ? { salt: existing.passwordSalt, hash: existing.passwordHash } : await hashPassword(password);
     const registration = { name: existing?.name || name.trim().slice(0, 80), email: normalized, phone: contactPhone, passwordSalt: credentials.salt, passwordHash: credentials.hash, existingUserId: existing?.id || null, tenantDetails: { businessName, branchName, city: details.city, country, countryCode: details.countryCode, currency, timeZone, locale: details.locale, latitude: details.latitude, longitude: details.longitude, categoryId: category.categoryId, subcategoryId: category.subcategoryId } };
     const result = await startRegistrationVerification(platform, { purpose: 'partner', email: normalized, phone: contactPhone, registration });
     if (result.error) return res.status(result.status).json({ error: result.error });
     const { status, ...challenge } = result; res.status(202).json(challenge);
   } catch (e) { next(e); }
 });
-app.post('/api/auth/verify-registration', async (req, res, next) => {
+app.post('/api/auth/verify-registration', registrationVerifyRateLimit, async (req, res, next) => {
   try {
     const platform = await readPlatform(); const result = await verifyRegistrationCodes(platform, { challengeId: String(req.body?.challengeId || ''), purpose: 'partner', emailCode: String(req.body?.emailCode || '') });
     if (result.error) return res.status(400).json({ error: result.error });
@@ -861,26 +1046,30 @@ app.post('/api/auth/verify-registration', async (req, res, next) => {
     res.status(201).json({ sessionToken: makeSession(user, tenant, branch), user: { id: user.id, name: user.name, email: user.email }, workspace: tenantWorkspace(tenant, branch), organizations: tenantChoices(platform, user) });
   } catch (e) { if (e.message.startsWith('Enter a business') || e.message.startsWith('Choose a') || e.message.startsWith('Enter both valid map coordinates')) return res.status(400).json({ error: e.message }); next(e); }
 });
-app.post('/api/auth/login', async (req, res, next) => {
+app.post('/api/auth/login', loginNetworkRateLimit, partnerLoginRateLimit, async (req, res, next) => {
   try {
-    const platform = await readPlatform(); const user = platform.users.find((u) => u.email === normalizeEmail(req.body?.email));
-    if (!user || !passwordMatches(String(req.body?.password || ''), user)) return res.status(401).json({ error: 'Email or password is incorrect.' });
+    const password = String(req.body?.password || '');
+    const email = normalizeEmail(req.body?.email);
+    if (password.length > 128 || email.length > 254) return res.status(401).json({ error: 'Email or password is incorrect.' });
+    const platform = await readPlatform(); const user = platform.users.find((u) => u.email === email && u.active !== false);
+    if (!user) await performDummyPasswordCheck(password);
+    if (!user || !await passwordMatches(password, user)) return res.status(401).json({ error: 'Email or password is incorrect.' });
     const organizations = tenantChoices(platform, user);
     if (!organizations.length) return res.status(403).json({ error: 'This account has no active salon workspace.' });
     res.json({ loginToken: signToken({ type: 'login', userId: user.id, authVersion: accountAuthVersion(user), exp: Date.now() + 10 * 60 * 1000 }), user: { id: user.id, name: user.name, email: user.email }, organizations });
   } catch (e) { next(e); }
 });
-app.post('/api/auth/password-reset/start', async (req, res, next) => {
+app.post('/api/auth/password-reset/start', passwordResetRateLimit, async (req, res, next) => {
   try {
     const email = normalizeEmail(req.body?.email);
-    if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+    if (email.length > 254 || !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
     const platform = await readPlatform(); const result = await startPasswordReset(platform, { accountType: 'partner', email });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.status(202).json({ challengeId: result.challengeId, expiresInSeconds: 600, message: 'If an account matches that email, a password reset code has been sent.' });
     if (result.emailCode) sendPasswordResetEmail(email, result.emailCode).catch(() => console.warn('Password reset email delivery failed.'));
   } catch (e) { next(e); }
 });
-app.post('/api/auth/password-reset/complete', async (req, res, next) => {
+app.post('/api/auth/password-reset/complete', passwordResetVerifyRateLimit, async (req, res, next) => {
   try {
     const { challengeId, emailCode, password } = req.body || {};
     if (typeof password !== 'string' || password.length < 8 || password.length > 128) return res.status(400).json({ error: 'Choose a password between 8 and 128 characters.' });
@@ -893,7 +1082,7 @@ app.post('/api/auth/password-reset/complete', async (req, res, next) => {
 app.post('/api/auth/select', async (req, res, next) => {
   try {
     const auth = verifyToken(req.body?.loginToken); if (auth?.type !== 'login') return res.status(401).json({ error: 'Your sign-in session expired. Please sign in again.' });
-    const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === req.body?.tenantId && t.active && t.userIds.includes(user?.id)); const branch = tenant?.branches.find((b) => b.id === req.body?.branchId && b.active);
+    const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId && u.active !== false); const tenant = platform.tenants.find((t) => t.id === req.body?.tenantId && t.active && t.userIds.includes(user?.id)); const branch = tenant?.branches.find((b) => b.id === req.body?.branchId && b.active);
     if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your sign-in session expired. Please sign in again.' });
     if (!user || !tenant || !branch) return res.status(403).json({ error: 'You do not have access to this salon location.' });
     res.json({ sessionToken: makeSession(user, tenant, branch), user: { id: user.id, name: user.name, email: user.email }, workspace: tenantWorkspace(tenant, branch), organizations: tenantChoices(platform, user) });
@@ -902,7 +1091,7 @@ app.post('/api/auth/select', async (req, res, next) => {
 app.get('/api/auth/me', async (req, res, next) => {
   try {
     const auth = verifyToken(req.get('x-session-token')); if (auth?.type !== 'session') return res.status(401).json({ error: 'Sign in to continue.' });
-    const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === auth.tenantId && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === auth.branchId);
+    const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId && u.active !== false); const tenant = platform.tenants.find((t) => t.id === auth.tenantId && t.active && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === auth.branchId && b.active);
     if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     if (!tenant || !branch) return res.status(401).json({ error: 'This workspace is no longer available.' });
     res.json({ user: { id: user.id, name: user.name, email: user.email }, workspace: tenantWorkspace(tenant, branch), organizations: tenantChoices(platform, user) });
@@ -911,7 +1100,7 @@ app.get('/api/auth/me', async (req, res, next) => {
 app.post('/api/auth/switch-context', async (req, res, next) => {
   try {
     const auth = verifyToken(req.get('x-session-token')); if (auth?.type !== 'session') return res.status(401).json({ error: 'Sign in to continue.' });
-    const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === req.body?.tenantId && t.active && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === req.body?.branchId && b.active);
+    const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId && u.active !== false); const tenant = platform.tenants.find((t) => t.id === req.body?.tenantId && t.active && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === req.body?.branchId && b.active);
     if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     if (!tenant || !branch) return res.status(403).json({ error: 'You do not have access to this salon location.' });
     res.json({ sessionToken: makeSession(user, tenant, branch), workspace: tenantWorkspace(tenant, branch) });
@@ -920,12 +1109,12 @@ app.post('/api/auth/switch-context', async (req, res, next) => {
 app.post('/api/auth/create-organization', async (req, res, next) => {
   try {
     const auth = verifyToken(req.get('x-session-token')); if (auth?.type !== 'session') return res.status(401).json({ error: 'Sign in to continue.' });
-    const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId); if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
+    const platform = await readPlatform(); const user = platform.users.find((u) => u.id === auth.userId && u.active !== false); if (!user || !authVersionMatches(auth, user)) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     const { tenant, branch } = await createTenantForUser(platform, user, req.body || {}); await writePlatform(platform);
     res.status(201).json({ sessionToken: makeSession(user, tenant, branch), workspace: tenantWorkspace(tenant, branch) });
   } catch (e) { if (e.message.startsWith('Enter a business') || e.message.startsWith('Choose a')) return res.status(400).json({ error: e.message }); next(e); }
 });
-registerPlatformAdminRoutes(app, { databasePool, ensureDatabase, sessionSecret, readPlatform, sendEmail });
+registerPlatformAdminRoutes(app, { databasePool, ensureDatabase, sessionSecret, readPlatform, sendEmail, platformAdminLoginRateLimit, platformAdminBootstrapRateLimit });
 app.use('/api', async (req, res, next) => {
   if (req.path === '/health' || req.path.startsWith('/auth/')) return next();
   try {
@@ -935,7 +1124,7 @@ app.use('/api', async (req, res, next) => {
     if (req.path.startsWith('/admin/')) {
       const auth = verifyToken(req.get('x-session-token'));
       if (auth?.type !== 'session') return res.status(401).json({ error: 'Please sign in to a salon workspace.' });
-      const user = platform.users.find((u) => u.id === auth.userId); const tenant = platform.tenants.find((t) => t.id === auth.tenantId && t.active && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === auth.branchId && b.active);
+      const user = platform.users.find((u) => u.id === auth.userId && u.active !== false); const tenant = platform.tenants.find((t) => t.id === auth.tenantId && t.active && t.userIds.includes(auth.userId)); const branch = tenant?.branches.find((b) => b.id === auth.branchId && b.active);
       if (!user || !authVersionMatches(auth, user) || !tenant || !branch) return res.status(401).json({ error: 'This workspace session is no longer valid. Please sign in again.' });
       return scopeStorage.run({ platform, user, tenant, branch, session: auth }, next);
     }
@@ -951,15 +1140,22 @@ app.get('/api/salon/profile', async (_req, res, next) => {
 app.get('/api/reviews', async (_req, res, next) => {
   try { const reviews = (await readState()).reviews || []; const averageRating = reviews.length ? Math.round(reviews.reduce((sum, item) => sum + item.rating, 0) / reviews.length * 10) / 10 : null; res.json({ averageRating, ratingCount: reviews.length, reviews: reviews.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 30).map(({ rating, comment, customerName, createdAt }) => ({ rating, comment, customerName, createdAt })) }); } catch (e) { next(e); }
 });
-app.post('/api/reviews', async (req, res, next) => {
+app.post('/api/reviews', reviewRateLimit, async (req, res, next) => {
   try {
     const scope = scopeStorage.getStore(); const user = customerFromRequest(req, scope.platform); if (!user) return res.status(401).json({ error: 'Sign in to review this salon.' });
     const rating = Number(req.body?.rating); const reference = String(req.body?.reference || '').trim().toUpperCase(); const comment = String(req.body?.comment || '').trim().slice(0, 500);
     if (!Number.isInteger(rating) || rating < 1 || rating > 5) return res.status(400).json({ error: 'Choose a rating from 1 to 5 stars.' });
-    const state = await readState(); const appointment = state.appointments.find((item) => item.reference === reference && item.customerUserId === user.id);
-    if (!appointment || appointment.status !== 'completed') return res.status(403).json({ error: 'You can rate a salon after your completed visit.' });
-    state.reviews ||= []; if (state.reviews.some((item) => item.appointmentId === appointment.id)) return res.status(409).json({ error: 'This visit already has a review.' });
-    const review = { id: randomUUID(), appointmentId: appointment.id, rating, comment, customerName: user.name.split(' ')[0], createdAt: new Date().toISOString() }; state.reviews.push(review); await writeState(state); res.status(201).json({ review });
+    const outcome = await mutateStateSafely((state) => {
+      const appointment = state.appointments.find((item) => item.reference === reference && item.customerUserId === user.id);
+      if (!appointment || appointment.status !== 'completed') return { persist: false, httpStatus: 403, error: 'You can rate a salon after your completed visit.' };
+      state.reviews ||= [];
+      if (state.reviews.some((item) => item.appointmentId === appointment.id)) return { persist: false, httpStatus: 409, error: 'This visit already has a review.' };
+      const review = { id: randomUUID(), appointmentId: appointment.id, rating, comment, customerName: user.name.split(' ')[0], createdAt: new Date().toISOString() };
+      state.reviews.push(review);
+      return { review };
+    });
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.status(201).json({ review: outcome.review });
   } catch (e) { next(e); }
 });
 app.get('/api/customer/bookings', async (req, res, next) => {
@@ -982,7 +1178,7 @@ app.get('/api/availability', async (req, res, next) => {
     const state = await readState();
     const service = getService(state, req.query.serviceId);
     const date = String(req.query.date || '');
-    if (!service || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Choose a service and valid date.' });
+    if (!service || !validDateString(date)) return res.status(400).json({ error: 'Choose a service and valid date.' });
     const partySize = Number(req.query.partySize || 1);
     if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) return res.status(400).json({ error: 'Choose between 1 and 4 people.' });
     const preferredStaffId = String(req.query.staffId || '');
@@ -1000,7 +1196,7 @@ app.get('/api/availability', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-app.post('/api/appointments', async (req, res, next) => {
+app.post('/api/appointments', bookingCreateRateLimit, async (req, res, next) => {
   try {
     const scope = scopeStorage.getStore(); const customerUser = customerFromRequest(req, scope.platform);
     if (!customerUser) return res.status(401).json({ error: 'Create an account or sign in before booking.' });
@@ -1008,9 +1204,10 @@ app.post('/api/appointments', async (req, res, next) => {
     const { serviceId, staffId = '', date, time, notes = '' } = req.body || {}; const { name, phone } = customerUser;
     const partySize = Number(req.body?.partySize || 1);
     if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) return res.status(400).json({ error: 'Choose between 1 and 4 people.' });
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || !/^\d{2}:\d{2}$/.test(time || '')) return res.status(400).json({ error: 'Choose a valid date and time.' });
+    if (!validDateString(date) || !validTimeString(time)) return res.status(400).json({ error: 'Choose a valid date and available time.' });
     if (wallTimeInZone(date, time, scope.branch?.timeZone || 'Etc/UTC') <= new Date()) return res.status(400).json({ error: 'Choose a future time.' });
     const outcome = await mutateStateSafely((state) => {
+      if (!validSlotStart(time, state.settings.openingTime)) return { persist: false, httpStatus: 400, error: 'Choose an available appointment time.' };
       const service = getService(state, serviceId);
       if (!service) return { persist: false, httpStatus: 400, error: 'Choose a valid service.' };
       const assignedStaff = assignStaffForParty(state, date, time, service, partySize, staffId);
@@ -1031,7 +1228,7 @@ app.post('/api/appointments', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-app.post('/api/payments/order', async (req, res, next) => {
+app.post('/api/payments/order', paymentRateLimit, async (req, res, next) => {
   try {
     const scope = scopeStorage.getStore(); const user = customerFromRequest(req, scope.platform); if (!user) return res.status(401).json({ error: 'Sign in to pay your booking deposit.' });
     const state = await readState(); const appointment = state.appointments.find((item) => item.reference === String(req.body?.reference || '').toUpperCase() && item.customerUserId === user.id);
@@ -1042,7 +1239,7 @@ app.post('/api/payments/order', async (req, res, next) => {
     const keyId = process.env.RAZORPAY_KEY_ID; const keySecret = process.env.RAZORPAY_KEY_SECRET;
     if (!keyId || !keySecret) return res.json({ mode: 'demo', reference: appointment.reference, amount: depositTotal, currency, partySize: appointments.length, references: appointments.map((item) => item.reference), message: 'Demo payment only. No money will be charged.' });
     const auth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-    const response = await fetch('https://api.razorpay.com/v1/orders', { method: 'POST', headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: amountMinor, currency, receipt: appointment.reference, notes: { salon: scope.tenant.name, branch: scope.branch.name, appointment: appointment.reference } }) });
+    const response = await fetch('https://api.razorpay.com/v1/orders', { method: 'POST', signal: AbortSignal.timeout(10000), headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: amountMinor, currency, receipt: appointment.reference, notes: { salon: scope.tenant.name, branch: scope.branch.name, appointment: appointment.reference } }) });
     const order = await response.json(); if (!response.ok) return res.status(502).json({ error: order.error?.description || 'Could not start online payment.' });
     const recordResult = await mutateStateSafely((latest) => {
       const current = latest.appointments.find((item) => item.id === appointment.id && item.customerUserId === user.id);
@@ -1056,7 +1253,7 @@ app.post('/api/payments/order', async (req, res, next) => {
     res.json({ mode: 'razorpay', keyId, orderId: order.id, amount: amountMinor, currency, name: scope.tenant.name, description: `${appointment.depositPercent}% booking advance · ${appointment.reference}`, prefill: { name: user.name, email: user.email, contact: user.phone } });
   } catch (e) { next(e); }
 });
-app.post('/api/payments/demo-confirm', async (req, res, next) => {
+app.post('/api/payments/demo-confirm', paymentRateLimit, async (req, res, next) => {
   try {
     if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) return res.status(403).json({ error: 'Demo payments are disabled while Razorpay is configured.' });
     const scope = scopeStorage.getStore(); const user = customerFromRequest(req, scope.platform); if (!user) return res.status(401).json({ error: 'Sign in to confirm this payment.' });
@@ -1073,23 +1270,30 @@ app.post('/api/payments/demo-confirm', async (req, res, next) => {
     res.json(outcome);
   } catch (e) { next(e); }
 });
-app.post('/api/payments/verify', async (req, res, next) => {
+app.post('/api/payments/verify', paymentRateLimit, async (req, res, next) => {
   try {
     const scope = scopeStorage.getStore(); const user = customerFromRequest(req, scope.platform); if (!user) return res.status(401).json({ error: 'Sign in to confirm payment.' });
     const { razorpay_order_id: orderId, razorpay_payment_id: paymentId, razorpay_signature: signature } = req.body || {}; const state = await readState(); const record = (state.paymentRecords || []).find((item) => item.orderId === orderId && item.customerUserId === user.id);
     if (!record || !paymentId || !signature) return res.status(400).json({ error: 'Payment details do not match a booking.' });
     const expected = createHmac('sha256', process.env.RAZORPAY_KEY_SECRET || '').update(`${orderId}|${paymentId}`).digest(); const received = Buffer.from(signature, 'hex');
     if (expected.length !== received.length || !timingSafeEqual(expected, received)) return res.status(400).json({ error: 'Payment signature verification failed.' });
-    const auth = Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64'); const response = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, { headers: { Authorization: `Basic ${auth}` } }); const payment = await response.json();
+    const auth = Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64'); const response = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, { signal: AbortSignal.timeout(10000), headers: { Authorization: `Basic ${auth}` } }); const payment = await response.json();
     if (!response.ok || payment.order_id !== orderId || payment.status !== 'captured' || payment.amount !== record.amountMinor || payment.currency !== record.currency) return res.status(409).json({ error: 'Payment is not captured for the expected deposit. Check status or try again.' });
     const outcome = await mutateStateSafely((latest) => {
       const latestRecord = (latest.paymentRecords || []).find((item) => item.orderId === orderId && item.customerUserId === user.id);
       if (!latestRecord) return { persist: false, error: 'Payment booking was not found.' };
       const appointmentIds = latestRecord.appointmentIds || [latestRecord.appointmentId];
       const appointments = latest.appointments.filter((item) => appointmentIds.includes(item.id));
-      if (!appointments.length) return { persist: false, error: 'Payment booking was not found.' };
+      if (!appointments.length || appointments.length !== appointmentIds.length) return { persist: false, error: 'Payment booking was not found.' };
+      if (latestRecord.status === 'captured' && latestRecord.paymentId === paymentId) return { reference: appointments[0].reference, status: 'confirmed', paymentStatus: 'deposit-paid', depositAmount: latestRecord.amount, currency: latestRecord.currency, partySize: appointments.length, references: appointments.map((item) => item.reference) };
+      const alreadyPaidByAnotherPayment = appointments.some((item) => item.paymentId && item.paymentId !== paymentId);
+      const bookingNoLongerPayable = appointments.some((item) => item.status !== 'awaiting-payment' || (item.paymentExpiresAt && new Date(item.paymentExpiresAt) <= new Date()));
+      if (latestRecord.status === 'captured' || alreadyPaidByAnotherPayment || bookingNoLongerPayable) {
+        latestRecord.status = 'duplicate-captured'; latestRecord.paymentId = paymentId; latestRecord.requiresRefundReview = true; latestRecord.refundReviewReason = 'A captured payment arrived after this booking was already paid, changed, or expired.'; latestRecord.capturedAt = new Date().toISOString();
+        return { error: 'This booking was already paid, changed, or expired. The captured payment is flagged for refund review.' };
+      }
       confirmBookingGroup(appointments, { paymentStatus: 'deposit-paid', paymentId });
-      latestRecord.status = 'captured'; latestRecord.paymentId = paymentId;
+      latestRecord.status = 'captured'; latestRecord.paymentId = paymentId; latestRecord.capturedAt = new Date().toISOString();
       return { reference: appointments[0].reference, status: 'confirmed', paymentStatus: 'deposit-paid', depositAmount: latestRecord.amount, currency: latestRecord.currency, partySize: appointments.length, references: appointments.map((item) => item.reference) };
     }, scope);
     if (outcome.error) return res.status(404).json({ error: outcome.error });
@@ -1097,7 +1301,7 @@ app.post('/api/payments/verify', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-app.post('/api/booking/lookup', async (req, res, next) => {
+app.post('/api/booking/lookup', bookingLookupRateLimit, async (req, res, next) => {
   try {
     const state = await readState();
     const item = state.appointments.find((a) => a.reference === String(req.body?.reference || '').toUpperCase() && a.phone === String(req.body?.phone || '').trim());
@@ -1105,7 +1309,7 @@ app.post('/api/booking/lookup', async (req, res, next) => {
     res.json({ reference: item.reference, name: item.name, serviceId: item.serviceId, serviceName: item.serviceName, staffId: item.staffId, staffName: item.staffName, date: item.date, time: item.time, minutes: item.minutes, price: item.price, status: item.status, partySize: item.partySize || 1 });
   } catch (e) { next(e); }
 });
-app.patch('/api/booking/:reference', async (req, res, next) => {
+app.patch('/api/booking/:reference', bookingManageRateLimit, async (req, res, next) => {
   try {
     const scope = scopeStorage.getStore();
     const outcome = await mutateStateSafely((state) => {
@@ -1113,12 +1317,13 @@ app.patch('/api/booking/:reference', async (req, res, next) => {
       if (!item || item.phone !== String(req.body?.phone || '').trim()) return { persist: false, httpStatus: 404, error: 'Booking reference or phone number does not match.' };
       const group = bookingGroupAppointments(state, item);
       if (req.body.action === 'cancel') {
-        if (group.some((appointment) => appointment.status === 'completed')) return { persist: false, httpStatus: 409, error: 'Completed visits cannot be cancelled.' };
+        if (group.some((appointment) => !['awaiting-payment', 'confirmed'].includes(appointment.status))) return { persist: false, httpStatus: 409, error: 'This booking can no longer be cancelled online. Contact the salon for help.' };
         for (const appointment of group) { appointment.status = 'cancelled'; appointment.updatedAt = new Date().toISOString(); }
       } else if (req.body.action === 'reschedule') {
+        if (group.some((appointment) => !['awaiting-payment', 'confirmed'].includes(appointment.status))) return { persist: false, httpStatus: 409, error: 'This booking can no longer be changed online. Contact the salon for help.' };
         const service = getService(state, item.serviceId);
         const date = String(req.body.date || ''); const time = String(req.body.time || '');
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return { persist: false, httpStatus: 400, error: 'Choose a valid date and time.' };
+        if (!validDateString(date) || !validSlotStart(time, state.settings.openingTime)) return { persist: false, httpStatus: 400, error: 'Choose a valid date and time.' };
         if (!service || wallTimeInZone(date, time, state.settings.timeZone || scope.branch.timeZone || 'Etc/UTC') <= new Date()) return { persist: false, httpStatus: 409, error: 'That time is not available. Choose another slot.' };
         const assignedStaff = assignStaffForParty(state, date, time, service, group.length, req.body.staffId || item.staffId, group.map((appointment) => appointment.id));
         if (assignedStaff.length !== group.length) return { persist: false, httpStatus: 409, error: `That time needs ${group.length} available team member${group.length === 1 ? '' : 's'}. Choose another time.` };
@@ -1132,7 +1337,7 @@ app.patch('/api/booking/:reference', async (req, res, next) => {
 });
 
 app.use('/api/admin', requireAdmin);
-registerEventMarketplaceRoutes(app, { databasePool, ensureDatabase, scopeStorage, readPlatform, customerFromRequest, mutateStateSafely, readStateFor, distanceKm, wallTimeInZone, minutes, weekdayFromDate, sessionSecret });
+registerEventMarketplaceRoutes(app, { databasePool, ensureDatabase, scopeStorage, readPlatform, customerFromRequest, mutateStateSafely, readStateFor, distanceKm, wallTimeInZone, minutes, weekdayFromDate, sessionSecret, eventRequestRateLimit, eventActionRateLimit });
 app.get('/api/admin/branches', async (_req, res) => { const { tenant, branch } = scopeStorage.getStore(); res.json({ currentBranchId: branch.id, branches: tenant.branches.filter((b) => b.active) }); });
 app.post('/api/admin/branches', async (req, res, next) => {
   try {
@@ -1200,6 +1405,7 @@ app.patch('/api/admin/appointments/:id', async (req, res, next) => {
       if (date || time || staffId) {
         const service = getService(state, item.serviceId);
         const newDate = date || item.date; const newTime = time || item.time;
+        if (!validDateString(newDate) || !validTimeString(newTime) || !validSlotStart(newTime, state.settings.openingTime)) return { persist: false, httpStatus: 400, error: 'Choose a valid date and available time.' };
         const staff = service && assignStaff(state, newDate, newTime, service, staffId || item.staffId, item.id);
         if (!staff) return { persist: false, httpStatus: 409, error: 'That chair is no longer available.' };
         item.date = newDate; item.time = newTime; item.staffId = staff.id; item.staffName = staff.name;
@@ -1216,89 +1422,187 @@ app.get('/api/admin/staff', async (_req, res, next) => { try { res.json((await r
 app.post('/api/admin/staff', async (req, res, next) => {
   try {
     const { name, role = 'Barber', start = '10:00', end = '20:00', days = [2, 3, 4, 5, 6, 0] } = req.body || {};
-    if (typeof name !== 'string' || name.trim().length < 2 || !/^\d{2}:\d{2}$/.test(start) || !/^\d{2}:\d{2}$/.test(end) || minutes(start) >= minutes(end)) return res.status(400).json({ error: 'Enter a name and valid working hours.' });
-    const s = await readState(); const member = { id: randomUUID(), name: name.trim(), role: String(role).slice(0, 50), start, end, days: Array.isArray(days) ? days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6) : [2, 3, 4, 5, 6, 0], active: true, color: '#9cae83' };
-    s.staff.push(member); await writeState(s); res.status(201).json(member);
+    if (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 80 || typeof role !== 'string' || role.trim().length > 50 || !validTimeString(start) || !validTimeString(end) || minutes(start) >= minutes(end)) return res.status(400).json({ error: 'Enter a name and valid working hours.' });
+    if (!Array.isArray(days) || !days.length || days.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) return res.status(400).json({ error: 'Choose one or more valid working days.' });
+    const member = { id: randomUUID(), name: name.trim(), role: role.trim() || 'Barber', start, end, days: [...new Set(days)], active: true, color: '#9cae83' };
+    await mutateStateSafely((state) => { state.staff.push(member); return member; });
+    res.status(201).json(member);
   } catch (e) { next(e); }
 });
 app.patch('/api/admin/staff/:id', async (req, res, next) => {
-  try { const s = await readState(); const item = s.staff.find((x) => x.id === req.params.id); if (!item) return res.status(404).json({ error: 'Team member not found.' }); Object.assign(item, req.body, { id: item.id }); await writeState(s); res.json(item); } catch (e) { next(e); }
+  try {
+    const { name, role, start, end, days, active, color } = req.body || {};
+    if (name !== undefined && (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 80)) return res.status(400).json({ error: 'Enter a team member name between 2 and 80 characters.' });
+    if (role !== undefined && (typeof role !== 'string' || !role.trim() || role.trim().length > 50)) return res.status(400).json({ error: 'Enter a valid role.' });
+    if (start !== undefined && !validTimeString(start) || end !== undefined && !validTimeString(end)) return res.status(400).json({ error: 'Enter working hours in valid HH:MM format.' });
+    if (start !== undefined && end !== undefined && minutes(start) >= minutes(end)) return res.status(400).json({ error: 'End time must be after start time.' });
+    if (days !== undefined && (!Array.isArray(days) || !days.length || days.some((day) => !Number.isInteger(day) || day < 0 || day > 6))) return res.status(400).json({ error: 'Choose one or more valid working days.' });
+    if (active !== undefined && typeof active !== 'boolean') return res.status(400).json({ error: 'Active must be true or false.' });
+    if (color !== undefined && (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color))) return res.status(400).json({ error: 'Choose a valid team color.' });
+    const outcome = await mutateStateSafely((state) => {
+      const item = state.staff.find((row) => row.id === req.params.id);
+      if (!item) return { persist: false, httpStatus: 404, error: 'Team member not found.' };
+      const nextStart = start ?? item.start; const nextEnd = end ?? item.end;
+      if (minutes(nextStart) >= minutes(nextEnd)) return { persist: false, httpStatus: 400, error: 'End time must be after start time.' };
+      if (name !== undefined) item.name = name.trim(); if (role !== undefined) item.role = role.trim(); if (start !== undefined) item.start = start; if (end !== undefined) item.end = end;
+      if (days !== undefined) item.days = [...new Set(days)]; if (active !== undefined) item.active = active; if (color !== undefined) item.color = color;
+      return item;
+    });
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.json(outcome);
+  } catch (e) { next(e); }
 });
 app.get('/api/admin/services', async (_req, res, next) => { try { res.json((await readState()).services); } catch (e) { next(e); } });
 app.post('/api/admin/services', async (req, res, next) => {
-  try { const { name, category = 'Hair', minutes: duration, price, description = '' } = req.body || {}; if (typeof name !== 'string' || name.trim().length < 2 || !Number.isInteger(Number(duration)) || Number(duration) < 10 || Number(duration) > 240 || !Number.isFinite(Number(price)) || Number(price) < 0) return res.status(400).json({ error: 'Enter a service name, duration, and price.' }); const s = await readState(); const item = { id: randomUUID(), name: name.trim(), category: String(category).slice(0, 50), minutes: Number(duration), price: Number(price), description: String(description).slice(0, 200), active: true }; s.services.push(item); await writeState(s); res.status(201).json(item); } catch (e) { next(e); }
+  try {
+    const { name, category = 'Hair', minutes: duration, price, description = '' } = req.body || {};
+    if (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 100 || typeof category !== 'string' || category.length > 50 || !Number.isInteger(Number(duration)) || Number(duration) < 10 || Number(duration) > 240 || !Number.isFinite(Number(price)) || Number(price) < 0 || typeof description !== 'string' || description.length > 500) return res.status(400).json({ error: 'Enter a service name, duration, price, and valid details.' });
+    const item = { id: randomUUID(), name: name.trim(), category: category.trim(), minutes: Number(duration), price: Number(price), description: description.trim(), active: true };
+    await mutateStateSafely((state) => { state.services.push(item); return item; });
+    res.status(201).json(item);
+  } catch (e) { next(e); }
 });
 app.patch('/api/admin/services/:id', async (req, res, next) => {
-  try { const s = await readState(); const item = s.services.find((x) => x.id === req.params.id); if (!item) return res.status(404).json({ error: 'Service not found.' }); const { name, category, minutes: duration, price, description, active } = req.body || {}; if (name !== undefined && String(name).trim().length < 2 || duration !== undefined && (!Number.isInteger(Number(duration)) || Number(duration) < 10) || price !== undefined && (!Number.isFinite(Number(price)) || Number(price) < 0)) return res.status(400).json({ error: 'Invalid service details.' }); if (name !== undefined) item.name = String(name).trim(); if (category !== undefined) item.category = String(category).slice(0, 50); if (duration !== undefined) item.minutes = Number(duration); if (price !== undefined) item.price = Number(price); if (description !== undefined) item.description = String(description).slice(0, 200); if (active !== undefined) item.active = Boolean(active); await writeState(s); res.json(item); } catch (e) { next(e); }
+  try {
+    const { name, category, minutes: duration, price, description, active } = req.body || {};
+    if (name !== undefined && (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 100) || category !== undefined && (typeof category !== 'string' || category.length > 50) || duration !== undefined && (!Number.isInteger(Number(duration)) || Number(duration) < 10 || Number(duration) > 240) || price !== undefined && (!Number.isFinite(Number(price)) || Number(price) < 0) || description !== undefined && (typeof description !== 'string' || description.length > 500) || active !== undefined && typeof active !== 'boolean') return res.status(400).json({ error: 'Invalid service details.' });
+    const outcome = await mutateStateSafely((state) => {
+      const item = state.services.find((row) => row.id === req.params.id);
+      if (!item) return { persist: false, httpStatus: 404, error: 'Service not found.' };
+      if (name !== undefined) item.name = name.trim(); if (category !== undefined) item.category = category.trim(); if (duration !== undefined) item.minutes = Number(duration); if (price !== undefined) item.price = Number(price); if (description !== undefined) item.description = description.trim(); if (active !== undefined) item.active = active;
+      return item;
+    });
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.json(outcome);
+  } catch (e) { next(e); }
 });
 app.get('/api/admin/customers', async (req, res, next) => {
   try { const s = await readState(); const q = String(req.query.q || '').toLowerCase(); res.json(s.customers.filter((c) => !q || `${c.name} ${c.phone}`.toLowerCase().includes(q)).map((c) => ({ ...c, lastVisit: s.appointments.filter((a) => a.customerId === c.id).sort(byStart).at(-1)?.date || null, lifetimeSpend: s.orders.filter((o) => o.customerId === c.id).reduce((n, o) => n + o.total, 0) }))); } catch (e) { next(e); }
 });
 app.patch('/api/admin/customers/:id', async (req, res, next) => {
-  try { const s = await readState(); const c = s.customers.find((x) => x.id === req.params.id); if (!c) return res.status(404).json({ error: 'Customer not found.' }); if (typeof req.body.notes === 'string') c.notes = req.body.notes.slice(0, 500); await writeState(s); res.json(c); } catch (e) { next(e); }
+  try {
+    if (req.body?.notes !== undefined && (typeof req.body.notes !== 'string' || req.body.notes.length > 500)) return res.status(400).json({ error: 'Customer notes must be 500 characters or fewer.' });
+    const outcome = await mutateStateSafely((state) => {
+      const customer = state.customers.find((item) => item.id === req.params.id);
+      if (!customer) return { persist: false, httpStatus: 404, error: 'Customer not found.' };
+      if (typeof req.body?.notes === 'string') customer.notes = req.body.notes;
+      return customer;
+    });
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.json(outcome);
+  } catch (e) { next(e); }
 });
 app.get('/api/admin/products', async (_req, res, next) => { try { res.json((await readState()).products); } catch (e) { next(e); } });
 app.post('/api/admin/products', async (req, res, next) => {
-  try { const { name, category = 'General', price, stock = 0, lowStockAt = 3, sku = '' } = req.body || {}; if (typeof name !== 'string' || !name.trim() || !Number.isFinite(Number(price)) || Number(price) < 0 || !Number.isInteger(Number(stock)) || Number(stock) < 0) return res.status(400).json({ error: 'Enter a product name, price, and stock quantity.' }); const s = await readState(); const item = { id: randomUUID(), name: name.trim(), category: String(category).slice(0, 60), price: Number(price), stock: Number(stock), lowStockAt: Number(lowStockAt) || 0, sku: String(sku).slice(0, 40), active: true }; s.products.push(item); if (item.stock) s.movements.push({ id: randomUUID(), productId: item.id, productName: item.name, quantity: item.stock, type: 'initial', note: 'Opening stock', createdAt: new Date().toISOString() }); await writeState(s); res.status(201).json(item); } catch (e) { next(e); }
+  try {
+    const { name, category = 'General', price, stock = 0, lowStockAt = 3, sku = '' } = req.body || {};
+    const threshold = Number(lowStockAt);
+    if (typeof name !== 'string' || !name.trim() || name.trim().length > 100 || !Number.isFinite(Number(price)) || Number(price) < 0 || !Number.isInteger(Number(stock)) || Number(stock) < 0 || !Number.isInteger(threshold) || threshold < 0 || threshold > 100000) return res.status(400).json({ error: 'Enter a product name, price, valid stock, and reorder threshold.' });
+    const item = { id: randomUUID(), name: name.trim(), category: String(category).slice(0, 60), price: Number(price), stock: Number(stock), lowStockAt: threshold, sku: String(sku).slice(0, 40), active: true };
+    await mutateStateSafely((state) => {
+      state.products.push(item);
+      if (item.stock) state.movements.push({ id: randomUUID(), productId: item.id, productName: item.name, quantity: item.stock, type: 'initial', note: 'Opening stock', createdAt: new Date().toISOString() });
+      return item;
+    });
+    res.status(201).json(item);
+  } catch (e) { next(e); }
 });
 app.post('/api/admin/products/:id/receive', async (req, res, next) => {
-  try { const quantity = Number(req.body?.quantity); if (!Number.isInteger(quantity) || quantity < 1 || quantity > 10000) return res.status(400).json({ error: 'Enter a positive whole-number quantity.' }); const s = await readState(); const p = s.products.find((x) => x.id === req.params.id); if (!p) return res.status(404).json({ error: 'Product not found.' }); p.stock += quantity; s.movements.push({ id: randomUUID(), productId: p.id, productName: p.name, quantity, type: 'received', note: String(req.body?.note || 'Stock received').slice(0, 100), createdAt: new Date().toISOString() }); await writeState(s); res.json(p); } catch (e) { next(e); }
+  try {
+    const quantity = Number(req.body?.quantity);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 10000) return res.status(400).json({ error: 'Enter a positive whole-number quantity.' });
+    const outcome = await mutateStateSafely((state) => {
+      const product = state.products.find((item) => item.id === req.params.id);
+      if (!product) return { persist: false, httpStatus: 404, error: 'Product not found.' };
+      product.stock += quantity;
+      state.movements.push({ id: randomUUID(), productId: product.id, productName: product.name, quantity, type: 'received', note: String(req.body?.note || 'Stock received').slice(0, 100), createdAt: new Date().toISOString() });
+      return product;
+    });
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.json(outcome);
+  } catch (e) { next(e); }
 });
 app.get('/api/admin/purchases', async (_req, res, next) => { try { res.json((await readState()).purchaseOrders.slice().reverse()); } catch (e) { next(e); } });
 app.post('/api/admin/purchases', async (req, res, next) => {
   try {
     const { supplier, productId, quantity } = req.body || {}; const qty = Number(quantity);
-    if (typeof supplier !== 'string' || supplier.trim().length < 2 || !Number.isInteger(qty) || qty < 1 || qty > 10000) return res.status(400).json({ error: 'Enter a supplier and valid quantity.' });
-    const s = await readState(); const p = s.products.find((x) => x.id === productId && x.active);
-    if (!p) return res.status(404).json({ error: 'Choose an active product.' });
-    const order = { id: randomUUID(), reference: `PO-${Date.now().toString().slice(-8)}`, supplier: supplier.trim().slice(0, 100), productId: p.id, productName: p.name, quantity: qty, unitCost: Number(p.cost || p.price), total: qty * Number(p.cost || p.price), status: 'ordered', createdAt: new Date().toISOString() };
-    s.purchaseOrders.push(order); await writeState(s); res.status(201).json(order);
+    if (typeof supplier !== 'string' || supplier.trim().length < 2 || supplier.trim().length > 100 || !Number.isInteger(qty) || qty < 1 || qty > 10000) return res.status(400).json({ error: 'Enter a supplier and valid quantity.' });
+    const outcome = await mutateStateSafely((state) => {
+      const product = state.products.find((item) => item.id === productId && item.active);
+      if (!product) return { persist: false, httpStatus: 404, error: 'Choose an active product.' };
+      const unitCost = Number(product.cost || product.price);
+      const order = { id: randomUUID(), reference: `PO-${Date.now().toString().slice(-8)}-${randomBytes(2).toString('hex').toUpperCase()}`, supplier: supplier.trim(), productId: product.id, productName: product.name, quantity: qty, unitCost, total: qty * unitCost, status: 'ordered', createdAt: new Date().toISOString() };
+      state.purchaseOrders.push(order);
+      return order;
+    });
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.status(201).json(outcome);
   } catch (e) { next(e); }
 });
 app.patch('/api/admin/purchases/:id/receive', async (req, res, next) => {
   try {
-    const s = await readState(); const order = s.purchaseOrders.find((x) => x.id === req.params.id);
-    if (!order) return res.status(404).json({ error: 'Purchase order not found.' });
-    if (order.status === 'received') return res.status(409).json({ error: 'This purchase order was already received.' });
-    const p = s.products.find((x) => x.id === order.productId);
-    if (!p) return res.status(404).json({ error: 'The ordered product no longer exists.' });
-    p.stock += order.quantity; order.status = 'received'; order.receivedAt = new Date().toISOString();
-    s.movements.push({ id: randomUUID(), productId: p.id, productName: p.name, quantity: order.quantity, type: 'purchase', note: `${order.reference} · ${order.supplier}`, createdAt: order.receivedAt });
-    await writeState(s); res.json(order);
+    const outcome = await mutateStateSafely((state) => {
+      const order = state.purchaseOrders.find((item) => item.id === req.params.id);
+      if (!order) return { persist: false, httpStatus: 404, error: 'Purchase order not found.' };
+      if (order.status === 'received') return { persist: false, httpStatus: 409, error: 'This purchase order was already received.' };
+      const product = state.products.find((item) => item.id === order.productId);
+      if (!product) return { persist: false, httpStatus: 404, error: 'The ordered product no longer exists.' };
+      product.stock += order.quantity; order.status = 'received'; order.receivedAt = new Date().toISOString();
+      state.movements.push({ id: randomUUID(), productId: product.id, productName: product.name, quantity: order.quantity, type: 'purchase', note: `${order.reference} · ${order.supplier}`, createdAt: order.receivedAt });
+      return order;
+    });
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.json(outcome);
   } catch (e) { next(e); }
 });
 app.get('/api/admin/orders', async (_req, res, next) => { try { res.json((await readState()).orders.slice().reverse()); } catch (e) { next(e); } });
 app.post('/api/admin/orders', async (req, res, next) => {
   try {
     const { items = [], phone = '', customerName = '', paymentMethod = 'cash', discount = 0, redeemPoints = 0, appointmentReference = '' } = req.body || {};
-    if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'Add at least one item to the checkout.' });
+    if (!Array.isArray(items) || !items.length || items.length > 50) return res.status(400).json({ error: 'Add between 1 and 50 items to the checkout.' });
     if (!['cash', 'card', 'upi'].includes(paymentMethod)) return res.status(400).json({ error: 'Choose cash, card, or UPI.' });
-    const s = await readState(); const lines = [];
-    for (const raw of items) {
-      const qty = Number(raw.quantity || 1);
-      if (!Number.isInteger(qty) || qty < 1 || qty > 50) return res.status(400).json({ error: 'Invalid item quantity.' });
-      const item = raw.type === 'product' ? s.products.find((x) => x.id === raw.id && x.active) : s.services.find((x) => x.id === raw.id && x.active);
-      if (!item) return res.status(400).json({ error: 'One of the selected items is unavailable.' });
-      if (raw.type === 'product' && item.stock < qty) return res.status(409).json({ error: `${item.name} has only ${item.stock} in stock.` });
-      lines.push({ type: raw.type === 'product' ? 'product' : 'service', itemId: item.id, name: item.name, quantity: qty, unitPrice: item.price, lineTotal: item.price * qty });
-    }
-    const subtotal = lines.reduce((n, l) => n + l.lineTotal, 0);
-    const customer = phone && validPhone(phone) ? ensureCustomer(s, { name: String(customerName || 'Studio customer').trim(), phone: phone.trim() }) : null;
-    const pointsToUse = Math.max(0, Math.floor(Number(redeemPoints) || 0));
-    if (pointsToUse && (!customer || customer.points < pointsToUse)) return res.status(400).json({ error: 'Customer does not have enough loyalty points.' });
-    const pointsDiscount = pointsToUse * Number(s.settings.redemptionValue || 0.5);
-    const appliedDiscount = Math.min(subtotal, Math.max(0, Math.min(Number(discount) || 0, subtotal)) + pointsDiscount);
-    const beforeAdvance = Math.max(0, subtotal - appliedDiscount); let depositCredit = 0; let linkedAppointment = null;
-    if (appointmentReference) {
-      linkedAppointment = s.appointments.find((item) => item.reference === String(appointmentReference).toUpperCase() && item.phone === String(phone).trim());
-      if (!linkedAppointment || !['arrived', 'in-service', 'completed'].includes(linkedAppointment.status) || Number(linkedAppointment.depositPaid) <= 0 || linkedAppointment.depositApplied || linkedAppointment.depositForfeited) return res.status(400).json({ error: 'Booking reference has no available deposit to apply. Confirm the customer and booking status.' });
-      depositCredit = Math.min(beforeAdvance, Number(linkedAppointment.depositPaid)); linkedAppointment.depositApplied = depositCredit; linkedAppointment.depositAppliedAt = new Date().toISOString(); linkedAppointment.status = 'completed'; linkedAppointment.paymentStatus = linkedAppointment.paymentStatus === 'demo-paid' ? 'demo-applied' : 'applied';
-    }
-    const total = Math.max(0, beforeAdvance - depositCredit);
-    const order = { id: randomUUID(), receipt: `FM-${Date.now().toString().slice(-8)}`, customerId: customer?.id || null, customerName: customer?.name || 'Walk-in', phone: customer?.phone || '', appointmentReference: linkedAppointment?.reference || null, depositCredit, items: lines, subtotal, discount: appliedDiscount, total, paymentMethod, paymentStatus: 'paid', pointsRedeemed: pointsToUse, pointsEarned: customer ? Math.floor(total * Number(s.settings.pointsPerRupee || 0.1)) : 0, createdAt: new Date().toISOString() };
-    for (const line of lines) if (line.type === 'product') { const p = s.products.find((x) => x.id === line.itemId); p.stock -= line.quantity; s.movements.push({ id: randomUUID(), productId: p.id, productName: p.name, quantity: -line.quantity, type: 'sold', note: `Receipt ${order.receipt}`, createdAt: order.createdAt }); }
-    if (customer) { customer.points = customer.points - pointsToUse + order.pointsEarned; customer.visits += lines.some((l) => l.type === 'service') ? 1 : 0; }
-    s.orders.push(order); await writeState(s); res.status(201).json(order);
+    if (!Number.isFinite(Number(discount)) || Number(discount) < 0 || !Number.isInteger(Number(redeemPoints)) || Number(redeemPoints) < 0) return res.status(400).json({ error: 'Enter a valid discount and whole-number reward points.' });
+    const outcome = await mutateStateSafely((state) => {
+      const lines = []; const reservedProducts = new Map();
+      for (const raw of items) {
+        if (!raw || !['product', 'service'].includes(raw.type)) return { persist: false, httpStatus: 400, error: 'Choose a valid product or service.' };
+        const quantity = Number(raw.quantity === undefined ? 1 : raw.quantity);
+        if (!Number.isInteger(quantity) || quantity < 1 || quantity > 50) return { persist: false, httpStatus: 400, error: 'Invalid item quantity.' };
+        const item = raw.type === 'product' ? state.products.find((row) => row.id === raw.id && row.active) : state.services.find((row) => row.id === raw.id && row.active);
+        if (!item) return { persist: false, httpStatus: 400, error: 'One of the selected items is unavailable.' };
+        if (raw.type === 'product') {
+          const alreadyReserved = reservedProducts.get(item.id) || 0;
+          if (item.stock - alreadyReserved < quantity) return { persist: false, httpStatus: 409, error: `${item.name} does not have enough stock for this bill.` };
+          reservedProducts.set(item.id, alreadyReserved + quantity);
+        }
+        lines.push({ type: raw.type, itemId: item.id, name: item.name, quantity, unitPrice: item.price, lineTotal: item.price * quantity });
+      }
+      const subtotal = lines.reduce((total, line) => total + line.lineTotal, 0);
+      if (!Number.isFinite(subtotal) || subtotal < 0) return { persist: false, httpStatus: 400, error: 'The bill total is invalid.' };
+      const customer = phone && validPhone(phone) ? ensureCustomer(state, { name: String(customerName || 'Studio customer').trim().slice(0, 80), phone: phone.trim() }) : null;
+      const pointsToUse = Number(redeemPoints);
+      if (pointsToUse && (!customer || customer.points < pointsToUse)) return { persist: false, httpStatus: 400, error: 'Customer does not have enough loyalty points.' };
+      const pointsDiscount = pointsToUse * Number(state.settings.redemptionValue || 0.5);
+      const appliedDiscount = Math.min(subtotal, Math.min(Number(discount), subtotal) + pointsDiscount);
+      const beforeAdvance = Math.max(0, subtotal - appliedDiscount); let depositCredit = 0; let linkedAppointment = null;
+      if (appointmentReference) {
+        linkedAppointment = state.appointments.find((item) => item.reference === String(appointmentReference).toUpperCase() && item.phone === String(phone).trim());
+        if (!linkedAppointment || !['arrived', 'in-service', 'completed'].includes(linkedAppointment.status) || Number(linkedAppointment.depositPaid) <= 0 || linkedAppointment.depositApplied || linkedAppointment.depositForfeited) return { persist: false, httpStatus: 400, error: 'Booking reference has no available deposit to apply. Confirm the customer and booking status.' };
+        depositCredit = Math.min(beforeAdvance, Number(linkedAppointment.depositPaid)); linkedAppointment.depositApplied = depositCredit; linkedAppointment.depositAppliedAt = new Date().toISOString(); linkedAppointment.status = 'completed'; linkedAppointment.paymentStatus = linkedAppointment.paymentStatus === 'demo-paid' ? 'demo-applied' : 'applied';
+      }
+      const total = Math.max(0, beforeAdvance - depositCredit);
+      const createdAt = new Date().toISOString();
+      const order = { id: randomUUID(), receipt: `FM-${Date.now().toString().slice(-8)}-${randomBytes(2).toString('hex').toUpperCase()}`, customerId: customer?.id || null, customerName: customer?.name || 'Walk-in', phone: customer?.phone || '', appointmentReference: linkedAppointment?.reference || null, depositCredit, items: lines, subtotal, discount: appliedDiscount, total, paymentMethod, paymentStatus: 'paid', pointsRedeemed: pointsToUse, pointsEarned: customer ? Math.floor(total * Number(state.settings.pointsPerRupee || 0.1)) : 0, createdAt };
+      for (const [productId, quantity] of reservedProducts) {
+        const product = state.products.find((row) => row.id === productId); product.stock -= quantity;
+        state.movements.push({ id: randomUUID(), productId: product.id, productName: product.name, quantity: -quantity, type: 'sold', note: `Receipt ${order.receipt}`, createdAt });
+      }
+      if (customer) { customer.points = customer.points - pointsToUse + order.pointsEarned; customer.visits += lines.some((line) => line.type === 'service') ? 1 : 0; }
+      state.orders.push(order);
+      return { order };
+    });
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.status(201).json(outcome.order);
   } catch (e) { next(e); }
 });
 app.get('/api/admin/analytics', async (_req, res, next) => {
@@ -1311,16 +1615,40 @@ app.get('/api/admin/analytics', async (_req, res, next) => {
 });
 app.get('/api/admin/settings', async (_req, res, next) => { try { res.json((await readState()).settings); } catch (e) { next(e); } });
 app.patch('/api/admin/settings', async (req, res, next) => {
-  try { const s = await readState(); const { openingTime, closingTime, openDays, businessName } = req.body || {}; if (openingTime && !/^\d{2}:\d{2}$/.test(openingTime) || closingTime && !/^\d{2}:\d{2}$/.test(closingTime)) return res.status(400).json({ error: 'Enter times in HH:MM format.' }); if (openingTime) s.settings.openingTime = openingTime; if (closingTime) s.settings.closingTime = closingTime; if (Array.isArray(openDays)) s.settings.openDays = openDays.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6); if (typeof businessName === 'string' && businessName.trim()) s.settings.businessName = businessName.trim().slice(0, 80); await writeState(s); res.json(s.settings); } catch (e) { next(e); }
+  try {
+    const { openingTime, closingTime, openDays, businessName } = req.body || {};
+    if (openingTime !== undefined && !validTimeString(openingTime) || closingTime !== undefined && !validTimeString(closingTime)) return res.status(400).json({ error: 'Enter valid opening and closing times in HH:MM format.' });
+    if (openDays !== undefined && (!Array.isArray(openDays) || openDays.some((day) => !Number.isInteger(day) || day < 0 || day > 6))) return res.status(400).json({ error: 'Choose valid working days.' });
+    if (businessName !== undefined && (typeof businessName !== 'string' || businessName.trim().length > 80)) return res.status(400).json({ error: 'Business name must be 80 characters or fewer.' });
+    const outcome = await mutateStateSafely((state) => {
+      const nextOpening = openingTime ?? state.settings.openingTime; const nextClosing = closingTime ?? state.settings.closingTime;
+      if (minutes(nextOpening) >= minutes(nextClosing)) return { persist: false, httpStatus: 400, error: 'Closing time must be after opening time.' };
+      if (openingTime !== undefined) state.settings.openingTime = openingTime;
+      if (closingTime !== undefined) state.settings.closingTime = closingTime;
+      if (openDays !== undefined) state.settings.openDays = [...new Set(openDays)];
+      if (businessName?.trim()) state.settings.businessName = businessName.trim();
+      return state.settings;
+    });
+    if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
+    res.json(outcome);
+  } catch (e) { next(e); }
 });
 app.get('/api/admin/movements', async (_req, res, next) => { try { res.json((await readState()).movements.slice().reverse()); } catch (e) { next(e); } });
 app.get('/api/admin/ics/:id', async (req, res, next) => {
-  try { const s = await readState(); const a = s.appointments.find((x) => x.id === req.params.id); if (!a) return res.status(404).end(); const date = a.date.replaceAll('-', ''); const time = a.time.replace(':', '') + '00'; const end = minutes(a.time) + a.minutes; const endTime = `${String(Math.floor(end / 60)).padStart(2, '0')}${String(end % 60).padStart(2, '0')}00`; res.type('text/calendar').attachment(`booking-${a.reference}.ics`).send(`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//FORME//Barber Studio//EN\r\nBEGIN:VEVENT\r\nUID:${a.id}@forme.local\r\nDTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}\r\nDTSTART:${date}T${time}\r\nDTEND:${date}T${endTime}\r\nSUMMARY:${a.serviceName} at FORME\r\nDESCRIPTION:Booking ${a.reference} with ${a.staffName}\r\nEND:VEVENT\r\nEND:VCALENDAR`); } catch (e) { next(e); }
+  try { const s = await readState(); const a = s.appointments.find((x) => x.id === req.params.id); if (!a) return res.status(404).end(); const date = a.date.replaceAll('-', ''); const time = a.time.replace(':', '') + '00'; const end = minutes(a.time) + a.minutes; const endTime = `${String(Math.floor(end / 60)).padStart(2, '0')}${String(end % 60).padStart(2, '0')}00`; res.set('Cache-Control', 'private, no-store').type('text/calendar').attachment(`booking-${a.reference}.ics`).send(`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//FORME//Barber Studio//EN\r\nBEGIN:VEVENT\r\nUID:${a.id}@forme.local\r\nDTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}\r\nDTSTART:${date}T${time}\r\nDTEND:${date}T${endTime}\r\nSUMMARY:${escapeCalendarText(a.serviceName)} at FORME\r\nDESCRIPTION:Booking ${escapeCalendarText(a.reference)} with ${escapeCalendarText(a.staffName)}\r\nEND:VEVENT\r\nEND:VCALENDAR`); } catch (e) { next(e); }
 });
 
 app.get('/events', (_req, res) => res.sendFile(path.join(clientDir, 'events.html')));
 app.get('/platform-admin', (_req, res) => { res.set({ 'Content-Security-Policy': "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'", 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' }); res.sendFile(path.join(clientDir, 'platform-admin.html')); });
 app.get('*', (req, res, next) => { if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'API endpoint not found.' }); if (path.extname(req.path)) return next(); if (req.accepts('html')) return res.sendFile(path.join(clientDir, 'index.html')); next(); });
 
-app.use((error, _req, res, _next) => { console.error(error); res.status(Number.isInteger(error.statusCode) ? error.statusCode : 500).json({ error: Number.isInteger(error.statusCode) ? error.message : 'Something went wrong. Please try again.' }); });
+app.use((error, req, res, _next) => {
+  const parserError = typeof error.type === 'string' && error.type.startsWith('entity.');
+  const appStatus = !parserError && Number.isInteger(error.statusCode) ? error.statusCode : null;
+  const parserStatus = Number.isInteger(error.status) && error.status >= 400 && error.status < 500 ? error.status : null;
+  const status = appStatus || parserStatus || 500;
+  console.error('Request failed.', { status, code: String(error.code || '').slice(0, 80) || null, name: String(error.name || '').slice(0, 80) || null, method: req.method, path: req.path });
+  const message = parserError ? (status === 413 ? 'Request body exceeds the allowed size.' : 'Invalid request body.') : appStatus ? error.message : status === 400 ? 'Invalid request body.' : status === 413 ? 'Request body exceeds the allowed size.' : status < 500 ? 'Request could not be processed.' : 'Something went wrong. Please try again.';
+  res.status(status).json({ error: message });
+});
 app.listen(port, () => console.log(`FORME Barber Studio listening on port ${port}`));

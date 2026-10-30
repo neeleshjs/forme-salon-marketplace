@@ -98,7 +98,7 @@ function businessReviewRow(tenant, platform) {
   return { id: tenant.id, slug: tenant.slug, name: tenant.name, categoryId: tenant.categoryId || 'hair-salon', categoryName: tenant.categoryName || 'Hair salon and unisex salon', subcategoryName: tenant.subcategoryName || null, status: reviewStatus(tenant), reviewNote: tenant.reviewNote || '', createdAt: tenant.createdAt, ownerEmail: owner?.email || '', branches: branches.map((branch) => ({ name: branch.name, city: branch.city || '', country: branch.country || '' })) };
 }
 
-export function registerPlatformAdminRoutes(app, { databasePool, ensureDatabase, sessionSecret, readPlatform, sendEmail }) {
+export function registerPlatformAdminRoutes(app, { databasePool, ensureDatabase, sessionSecret, readPlatform, sendEmail, platformAdminLoginRateLimit, platformAdminBootstrapRateLimit }) {
   const router = express.Router();
   const key = secretKey(sessionSecret);
   const secureSessionSecret = sessionSecret !== 'local-prototype-session-secret-change-before-deploy';
@@ -138,7 +138,7 @@ export function registerPlatformAdminRoutes(app, { databasePool, ensureDatabase,
     try { const { rows } = await query('SELECT EXISTS(SELECT 1 FROM platform_admin_users) AS has_admin'); res.json({ hasAdmin: rows[0].has_admin, bootstrapEnabled: Boolean(secureSessionSecret && bootstrapEmail() && String(process.env.PLATFORM_ADMIN_BOOTSTRAP_TOKEN || '').length >= 32) }); }
     catch (error) { next(error); }
   });
-  router.post('/bootstrap/start', async (req, res, next) => {
+  router.post('/bootstrap/start', platformAdminBootstrapRateLimit, async (req, res, next) => {
     try {
       const email = normEmail(req.body?.email); const providedToken = String(req.body?.bootstrapToken || ''); const configuredToken = String(process.env.PLATFORM_ADMIN_BOOTSTRAP_TOKEN || '');
       if (!secureSessionSecret) return res.status(503).json({ error: 'Set a private SESSION_SECRET before enabling platform-admin setup.' });
@@ -154,7 +154,7 @@ export function registerPlatformAdminRoutes(app, { databasePool, ensureDatabase,
       });
     } catch (error) { next(error); }
   });
-  router.post('/bootstrap/complete', async (req, res, next) => {
+  router.post('/bootstrap/complete', platformAdminBootstrapRateLimit, async (req, res, next) => {
     try {
       const setupToken = String(req.body?.setupToken || ''); const name = String(req.body?.name || '').trim().slice(0, 80); const password = String(req.body?.password || '');
       if (name.length < 2 || password.length < 12 || password.length > 128) return res.status(400).json({ error: 'Use your name and a unique password of 12 to 128 characters.' });
@@ -175,7 +175,7 @@ export function registerPlatformAdminRoutes(app, { databasePool, ensureDatabase,
       });
     } catch (error) { next(error); }
   });
-  router.post('/login', async (req, res, next) => {
+  router.post('/login', platformAdminLoginRateLimit, async (req, res, next) => {
     try {
       const email = normEmail(req.body?.email); const password = String(req.body?.password || '');
       if (email.length > 254 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 12 || password.length > 128) return res.status(401).json({ error: 'Email, password, or authenticator code is incorrect.' });

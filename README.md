@@ -47,6 +47,8 @@ The first start creates the demo owner and FORME location in `server/data/platfo
 - New partner listings enter `pending_review` and stay out of public search and booking until approved. Existing businesses without a review status remain treated as approved to preserve current listings. The partner dashboard displays the decision and reviewer note.
 - Reviewers can approve, reject, or suspend listings. Owners can manage categories and subcategories. Important changes are recorded in the platform-admin audit table; its API exposes no edit or delete action.
 - Sessions use an HttpOnly, Secure-on-HTTPS, SameSite=Strict cookie, CSRF token, an eight-hour expiry, server-side revocation, and TOTP replay prevention. MFA secrets are encrypted in PostgreSQL using a key derived from `SESSION_SECRET`; rotating that secret will require administrators to enroll MFA again.
+- In production, set a private `SESSION_SECRET` with at least 32 characters. Cross-origin API access is off by default; only set `ALLOWED_ORIGIN` to the exact trusted web origin(s) if the frontend is hosted separately.
+- Authentication, booking, payment, OTP, event, and admin bootstrap endpoints have request limits. IP-based limits currently live in the web process, so use a shared rate-limit store before running multiple instances or relying on limits across restarts.
 - The admin console is an initial operations layer, not a claim of complete production readiness. Payment disputes/refunds, customer-support case management, evidence-document storage, WebAuthn/passkeys, recovery codes, and independent security review are future work.
 
 ## Salon partner workflow

@@ -62,7 +62,7 @@ function publicPackage(row, items = []) {
 }
 
 export function registerEventMarketplaceRoutes(app, deps) {
-  const { databasePool, ensureDatabase, scopeStorage, readPlatform, customerFromRequest, mutateStateSafely, distanceKm, wallTimeInZone, minutes, weekdayFromDate, sessionSecret } = deps;
+  const { databasePool, ensureDatabase, scopeStorage, readPlatform, customerFromRequest, mutateStateSafely, distanceKm, wallTimeInZone, minutes, weekdayFromDate, sessionSecret, eventRequestRateLimit, eventActionRateLimit } = deps;
 
   async function ensureEventDatabase() {
     if (!databasePool) throw fail(503, 'Wedding and event requests need the connected PostgreSQL database.');
@@ -245,7 +245,7 @@ export function registerEventMarketplaceRoutes(app, deps) {
   app.post('/api/admin/event-packages', (req, res, next) => savePackage(req, res, next, false));
   app.patch('/api/admin/event-packages/:id', (req, res, next) => savePackage(req, res, next, true));
 
-  app.post('/api/events/quote-requests', async (req, res, next) => {
+  app.post('/api/events/quote-requests', eventRequestRateLimit, async (req, res, next) => {
     try {
       await ensureEventDatabase(); const scope = scopeStorage.getStore(); const platform = scope?.platform || await readPlatform();
       const customer = customerFromRequest(req, platform); if (!customer) return res.status(401).json({ error: 'Sign in to request an event quote.' });
@@ -387,7 +387,7 @@ export function registerEventMarketplaceRoutes(app, deps) {
     } catch (error) { next(error); }
   });
 
-  app.post('/api/events/quotes/:quoteId/respond', async (req, res, next) => {
+  app.post('/api/events/quotes/:quoteId/respond', eventActionRateLimit, async (req, res, next) => {
     try {
       await ensureEventDatabase(); const platform = scopeStorage.getStore()?.platform || await readPlatform(); const customer = customerFromRequest(req, platform);
       if (!customer) return res.status(401).json({ error: 'Sign in to respond to this quote.' });
@@ -491,7 +491,7 @@ export function registerEventMarketplaceRoutes(app, deps) {
       res.json(outcome);
     } catch (error) { next(error); }
   }
-  app.post('/api/events/:id/cancel', (req, res, next) => cancelEvent(req, res, next, false));
+  app.post('/api/events/:id/cancel', eventActionRateLimit, (req, res, next) => cancelEvent(req, res, next, false));
   app.post('/api/admin/events/requests/:id/cancel', (req, res, next) => cancelEvent(req, res, next, true));
 }
 
