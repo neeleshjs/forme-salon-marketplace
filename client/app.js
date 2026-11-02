@@ -149,6 +149,12 @@ async function api(path, options = {}) {
   try { response = await fetch(`${API_BASE}${path}`, { ...options, headers }); }
   catch { throw new Error('Could not connect. Check your internet connection and try again.'); }
   const data = response.status === 204 ? null : await response.json().catch(() => ({}));
+  if (response.status === 401 && (path.startsWith('/api/admin/') || ['/api/auth/me', '/api/auth/switch-context', '/api/auth/create-organization'].includes(path))) {
+    expirePartnerSession();
+    const error = new Error('Your salon session expired. Sign in again to continue.');
+    error.status = response.status;
+    throw error;
+  }
   if (!response.ok) {
     const errorCopy = {
       'Enter a valid country, currency, time zone, and map pin.': 'Check your country, currency and time zone. You can add the map pin later.',
@@ -166,7 +172,9 @@ async function api(path, options = {}) {
       'Could not start online payment.': 'Online payment could not start. Please try again or contact the salon.'
     };
     const rawMessage = data?.error || 'We could not complete that request. Please try again.';
-    throw new Error(errorCopy[rawMessage] || rawMessage);
+    const error = new Error(errorCopy[rawMessage] || rawMessage);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -417,7 +425,12 @@ function setAuthMode(mode) {
   $('#adminLogin').querySelector('[name="branchName"]').required = creating;
   showMessage($('#adminMessage'), '');
 }
-async function resumeSession() { try { const info = await api('/api/auth/me'); activeUser=info.user; activeWorkspace=info.workspace; organizations=info.organizations; await finishWorkspace(); } catch { sessionStorage.removeItem(tokenKey); } }
+function expirePartnerSession() {
+  sessionStorage.removeItem(tokenKey); activeUser = null; activeWorkspace = null; organizations = []; pendingLoginToken = '';
+  if (resolveRoute().name === 'studio') navigate('/partner/login', { replace: true });
+  if (['partner-login', 'partner-signup'].includes(resolveRoute().name)) showMessage($('#adminMessage'), 'Your salon session expired. Sign in again to continue.', true);
+}
+async function resumeSession() { try { const info = await api('/api/auth/me'); activeUser=info.user; activeWorkspace=info.workspace; organizations=info.organizations; await finishWorkspace(); } catch (error) { if (error.status !== 401) { if (resolveRoute().name === 'studio') notify('Could not verify your salon session. Check your connection and retry.', true); else showMessage($('#adminMessage'), 'We could not reconnect. Check your internet connection and try again.', true); } } }
 function updateListingReviewBanner() { const banner = $('#listingReviewBanner'); if (!banner || !activeWorkspace) return; const status = activeWorkspace.reviewStatus || 'approved'; if (status === 'approved') { banner.hidden = true; banner.textContent = ''; return; } const messages = { pending_review: 'Your salon is in the verification queue and is not visible to customers yet. You can finish setting up your services, team and hours while we review it.', rejected: 'Your listing needs changes before it can appear to customers. Review the note below and contact FORMÉ support if you need help.', suspended: 'Your listing is temporarily hidden from customer discovery. Review the note below and contact FORMÉ support.' }; banner.innerHTML = `<strong>${escapeHtml(status.replace('_', ' ').toUpperCase())}</strong><span>${escapeHtml(messages[status] || 'Your listing is awaiting a platform review.')}${activeWorkspace.reviewNote ? ` <b>Review note:</b> ${escapeHtml(activeWorkspace.reviewNote)}` : ''}</span>`; banner.hidden = false; }
 async function finishWorkspace() { updateListingReviewBanner(); $('#adminGate').hidden = true; $('#dashboard').hidden = false; $('#userAvatar').textContent = (activeUser?.name || 'F')[0].toUpperCase(); renderWorkspaceSelectors(); applyWorkspaceLocale(); const bookingUrl=`/salon/${encodeURIComponent(activeWorkspace.tenantSlug)}/booking?branch=${encodeURIComponent(activeWorkspace.branchId)}`; $('#studioBookingLink').href=bookingUrl; $('#studioNewBookingLink').href=bookingUrl; const route=resolveRoute(); if(route.name!=='studio') navigate('/studio/overview'); else enterDashboard(); }
 function applyWorkspaceLocale() { const org=organizations.find(o=>o.id===activeWorkspace?.tenantId); const branch=org?.branches.find(b=>b.id===activeWorkspace?.branchId); if(!branch)return; currentCurrency=branch.currency||'INR';currentTimeZone=branch.timeZone||'Etc/UTC';currentLocale=({INR:'en-IN',USD:'en-US',GBP:'en-GB',EUR:'en-IE',AED:'en-AE',SGD:'en-SG',CAD:'en-CA',AUD:'en-AU'})[currentCurrency]||'en'; $('#dateInput').value=localDate();$('#manageDate').value=localDate(); }
@@ -473,7 +486,7 @@ $('#adminLogin').addEventListener('submit', async (event) => {
       const challenge = await api('/api/auth/register', { method: 'POST', body: JSON.stringify(payload) });
       pendingPartnerChallengeId = challenge.challengeId; $('#partnerOtpDestinations').textContent = challenge.emailHint;
       sessionStorage.setItem(partnerChallengeKey, JSON.stringify({ challengeId: challenge.challengeId, emailHint: challenge.emailHint, expiresAt: Date.now() + challenge.expiresInSeconds * 1000 }));
-      $('#authCreateFields').hidden = true; $('#authSubmit').hidden = true; updatePartnerAuthTabs(); $('#partnerVerifyPanel').hidden = false;
+      $('#authCreateFields').hidden = true; $('#authSubmit').hidden = true; updatePartnerAuthTabs(); $('#partnerVerifyPanel').hidden = false; $('#partnerEmailCode').value = ''; $('#partnerEmailCode').focus();
       showMessage($('#adminMessage'), 'Email OTP sent. Enter it to verify your owner account.'); return;
     }
     const result = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: payload.email, password: payload.password }) });
@@ -496,6 +509,8 @@ $('#adminLogin').addEventListener('submit', async (event) => {
   } catch (error) { showMessage($('#adminMessage'), error.message, true); }
   finally { submitButton.disabled = false; submitButton.removeAttribute('aria-busy'); submitButton.textContent = originalLabel; }
 });
+$('#partnerEmailCode').addEventListener('input', () => { $('#partnerEmailCode').value = $('#partnerEmailCode').value.replace(/\D/g, '').slice(0, 6); });
+$('#partnerEmailCode').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('#partnerVerifyButton').click(); } });
 $('#partnerVerifyButton').addEventListener('click', async () => {
   const emailCode = $('#partnerEmailCode').value.trim();
   if (!/^\d{6}$/.test(emailCode)) return showMessage($('#adminMessage'), 'Enter the 6-digit OTP from your email.', true);
@@ -900,7 +915,7 @@ function restoreRegistrationChallenges() {
     } else if (customerReset && customerReset.expiresAt <= Date.now()) sessionStorage.removeItem(customerResetChallengeKey);
     const partner = JSON.parse(sessionStorage.getItem(partnerChallengeKey) || 'null');
     if (partner && partner.expiresAt > Date.now() && route.name === 'partner-signup') {
-      pendingPartnerChallengeId = partner.challengeId; $('#partnerOtpDestinations').textContent = `${partner.emailHint}`; $('#authCreateFields').hidden = true; $('#authSubmit').hidden = true; updatePartnerAuthTabs(); $('#partnerVerifyPanel').hidden = false; showMessage($('#adminMessage'), 'Enter the email OTP to finish setting up your salon account.');
+      pendingPartnerChallengeId = partner.challengeId; $('#partnerOtpDestinations').textContent = `${partner.emailHint}`; $('#authCreateFields').hidden = true; $('#authSubmit').hidden = true; updatePartnerAuthTabs(); $('#partnerVerifyPanel').hidden = false; $('#partnerEmailCode').focus(); showMessage($('#adminMessage'), 'Enter the email OTP to finish setting up your salon account.');
     } else if (partner && partner.expiresAt <= Date.now()) sessionStorage.removeItem(partnerChallengeKey);
     const customer = JSON.parse(sessionStorage.getItem(customerChallengeKey) || 'null');
     if (customer && customer.expiresAt > Date.now() && ['account', 'booking'].includes(route.name)) {

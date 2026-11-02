@@ -72,7 +72,7 @@
               <div class="partner-form-section">YOUR SALON</div>
               <label>Salon name<input name="businessName" maxlength="80" placeholder="e.g. Forme Salon" /></label>
               <label>First location<input name="branchName" maxlength="80" placeholder="e.g. Indiranagar, Bengaluru" /></label>
-              <div class="form-row"><label>City<input name="city" placeholder="e.g. Bengaluru" /></label><label>Country<input name="country" required placeholder="e.g. India" /></label></div>
+                <div class="form-row"><label>City<input name="city" placeholder="e.g. Bengaluru" /></label><label>Country<input name="country" required value="India" autocomplete="country-name" /></label></div>
               <div class="form-row"><label>Currency<select name="currency"><option>INR</option><option>USD</option><option>GBP</option><option>EUR</option><option>AED</option><option>SGD</option><option>CAD</option><option>AUD</option></select><small class="field-help">Choose the currency you charge in. For India, use INR.</small></label><label>Time zone<input name="timeZone" required value="Asia/Kolkata" /><small class="field-help">For India, keep Asia/Kolkata.</small></label></div>
               <div class="form-row"><label>Latitude <span class="optional">OPTIONAL MAP PIN</span><input name="latitude" type="number" min="-90" max="90" step="any" placeholder="Optional" /></label><label>Longitude <span class="optional">OPTIONAL MAP PIN</span><input name="longitude" type="number" min="-180" max="180" step="any" placeholder="Optional" /></label></div>
               <button class="location-pin-button" id="captureSignupLocation" type="button">Use my location to add the salon map pin</button>
