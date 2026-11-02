@@ -97,8 +97,7 @@ function renderRoute() {
     loadDirectoryCategories(params.get('categoryId') || '').then(() => loadSalonDirectory($('#salonSearch').value.trim()));
   } else if (route.name === 'partner') document.title = 'For salon owners - FORME';
   else if (route.name === 'account') { document.title = 'My bookings - FORME'; $('#customerAuthPanel h3').textContent = 'Sign in to view your bookings'; }
-  else if (['salon', 'booking'].includes(route.name)) $('#customerAuthPanel h3').textContent = 'Sign in to book';
-  else if (route.name === 'salon' || route.name === 'booking') loadPublicData();
+  else if (['salon', 'booking'].includes(route.name)) { $('#customerAuthPanel h3').textContent = 'Sign in to book'; loadPublicData(); }
   else if (route.name === 'manage') document.title = 'Manage booking - FORME';
   else if (route.name === 'partner-login' || route.name === 'partner-signup') {
     document.title = route.name === 'partner-signup' ? 'Create a salon account - FORME' : 'Salon owner sign in - FORME';

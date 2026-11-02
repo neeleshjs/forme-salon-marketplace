@@ -206,6 +206,8 @@ before(async () => {
     GMAIL_APPS_SCRIPT_TOKEN: '',
     PLATFORM_ADMIN_BOOTSTRAP_EMAIL: '',
     PLATFORM_ADMIN_BOOTSTRAP_TOKEN: '',
+    RAZORPAY_KEY_ID: '',
+    RAZORPAY_KEY_SECRET: '',
     RAZORPAY_WEBHOOK_SECRET: 'test-only-webhook-secret',
   };
   serverProcess = spawn(process.execPath, ['src/server.js'], { cwd: serverDir, env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -382,6 +384,37 @@ test('group bookings get unique references and simultaneous staff assignments', 
   assert.equal(result.appointments[0].reference.length, 16);
   assert.equal(result.appointments[1].reference.length, 16);
   assert.notEqual(result.appointments[0].reference, result.appointments[1].reference);
+});
+
+test('customer can find a salon time, book, pay the demo deposit, and manage the booking', async () => {
+  const login = await postJson('/api/customer/login', { email: 'customer@example.com', password: 'LocalCustomerPassword123!' });
+  assert.equal(login.status, 200);
+  const { customerToken } = await login.json();
+  const contextHeaders = { 'Content-Type': 'application/json', 'x-salon-slug': 'test-salon', 'x-branch-id': 'branch-1', 'x-customer-token': customerToken };
+  const futureDate = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+  const availability = await fetch(`${baseUrl}/api/availability?serviceId=service-1&date=${futureDate}`, { headers: contextHeaders });
+  assert.equal(availability.status, 200);
+  const slots = await availability.json();
+  assert.ok(slots.slots.some((slot) => slot.time === '10:00'));
+
+  const created = await fetch(`${baseUrl}/api/appointments`, { method: 'POST', headers: contextHeaders, body: JSON.stringify({ serviceId: 'service-1', date: futureDate, time: '10:00', depositPolicyAccepted: true }) });
+  assert.equal(created.status, 201);
+  const booking = (await created.json()).appointment;
+  assert.equal(booking.status, 'awaiting-payment');
+
+  const paymentOrder = await fetch(`${baseUrl}/api/payments/order`, { method: 'POST', headers: contextHeaders, body: JSON.stringify({ reference: booking.reference }) });
+  assert.equal(paymentOrder.status, 200);
+  assert.equal((await paymentOrder.json()).mode, 'demo');
+  const confirmed = await fetch(`${baseUrl}/api/payments/demo-confirm`, { method: 'POST', headers: contextHeaders, body: JSON.stringify({ reference: booking.reference }) });
+  assert.equal(confirmed.status, 200);
+  assert.equal((await confirmed.json()).status, 'confirmed');
+
+  const bookings = await fetch(`${baseUrl}/api/customer/bookings`, { headers: contextHeaders });
+  assert.equal(bookings.status, 200);
+  assert.ok((await bookings.json()).some((item) => item.reference === booking.reference && item.status === 'confirmed'));
+  const cancelled = await fetch(`${baseUrl}/api/booking/${booking.reference}`, { method: 'PATCH', headers: contextHeaders, body: JSON.stringify({ action: 'cancel', phone: '+919123456780' }) });
+  assert.equal(cancelled.status, 200);
+  assert.equal((await cancelled.json()).status, 'cancelled');
 });
 
 test('completed bookings cannot be cancelled through the public phone and reference flow', async () => {
