@@ -194,6 +194,13 @@ a,button,input,select,textarea{-webkit-tap-highlight-color:transparent}
 .password-visibility-toggle svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 
 .group-booking-help{display:block;margin-top:.25rem;color:#737970;font-size:.75rem;line-height:1.45}
+.guest-booking-choices{display:grid;gap:.7rem}
+.guest-booking-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.75rem;margin:0;padding:.9rem;border:1px solid #dedbd1;border-radius:10px;background:#fffdf8;min-width:0}
+.guest-booking-card legend{padding:0 .3rem;color:#344238;font-size:.78rem;font-weight:700}
+.guest-booking-card label{display:grid;gap:.4rem;min-width:0;color:#62685f;font-size:.72rem;font-weight:600}
+.guest-booking-card select{width:100%;min-width:0;min-height:42px;padding:.6rem .7rem;border:1px solid #dedbd1;border-radius:7px;background:#fff;color:#17211c;font-size:.78rem}
+.guest-booking-card select:focus{outline:2px solid #9bad74;outline-offset:1px}
+@media(max-width:520px){.guest-booking-card{grid-template-columns:1fr;gap:.65rem;padding:.8rem}.guest-booking-card select{font-size:.82rem}.booking-form .form-row{grid-template-columns:1fr}}
 
 /* Partner sign-in and signup: responsive workspace entry */
 body[data-page="partner-login"] .admin-shell,

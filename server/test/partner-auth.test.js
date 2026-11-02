@@ -177,7 +177,10 @@ before(async () => {
   await mkdir(branchDataDir, { recursive: true });
   await writeFile(path.join(branchDataDir, 'branch-1.json'), JSON.stringify({
     settings: { businessName: 'Test Salon', branchName: 'Main branch', currency: 'INR', timeZone: 'Asia/Kolkata', openingTime: '10:00', closingTime: '20:00', openDays: [0, 1, 2, 3, 4, 5, 6] },
-    services: [{ id: 'service-1', name: 'Haircut', minutes: 30, price: 100, active: true }],
+    services: [
+      { id: 'service-1', name: 'Haircut', minutes: 30, price: 100, active: true },
+      { id: 'service-2', name: 'Beard trim', minutes: 45, price: 150, active: true },
+    ],
     staff: [
       { id: 'staff-1', name: 'Test Barber', role: 'Barber', start: '10:00', end: '20:00', days: [0, 1, 2, 3, 4, 5, 6], active: true },
       { id: 'staff-2', name: 'Second Barber', role: 'Barber', start: '10:00', end: '20:00', days: [0, 1, 2, 3, 4, 5, 6], active: true },
@@ -384,6 +387,60 @@ test('group bookings get unique references and simultaneous staff assignments', 
   assert.equal(result.appointments[0].reference.length, 16);
   assert.equal(result.appointments[1].reference.length, 16);
   assert.notEqual(result.appointments[0].reference, result.appointments[1].reference);
+});
+
+test('group booking lets each guest choose a service and stylist, then keeps those services on reschedule', async () => {
+  const login = await postJson('/api/customer/login', { email: 'customer@example.com', password: 'LocalCustomerPassword123!' });
+  const { customerToken } = await login.json();
+  const contextHeaders = { 'Content-Type': 'application/json', 'x-salon-slug': 'test-salon', 'x-branch-id': 'branch-1', 'x-customer-token': customerToken };
+  const firstDate = new Date(Date.now() + 21 * 86400000).toISOString().slice(0, 10);
+  const nextDate = new Date(Date.now() + 22 * 86400000).toISOString().slice(0, 10);
+  const guests = [{ serviceId: 'service-1', staffId: 'staff-1' }, { serviceId: 'service-2', staffId: 'staff-2' }];
+  const availabilityQuery = new URLSearchParams({ date: firstDate, guests: JSON.stringify(guests) });
+  const available = await fetch(`${baseUrl}/api/availability?${availabilityQuery}`, { headers: contextHeaders });
+  assert.equal(available.status, 200);
+  const slots = await available.json();
+  const tenAm = slots.slots.find((slot) => slot.time === '10:00');
+  assert.deepEqual(tenAm.assignments.map((item) => [item.serviceId, item.staffId]), [['service-1', 'staff-1'], ['service-2', 'staff-2']]);
+
+  const created = await fetch(`${baseUrl}/api/appointments`, { method: 'POST', headers: contextHeaders, body: JSON.stringify({ guests, date: firstDate, time: '10:00', depositPolicyAccepted: true }) });
+  assert.equal(created.status, 201);
+  const result = await created.json();
+  assert.deepEqual(result.appointments.map((item) => [item.serviceId, item.staffId]), [['service-1', 'staff-1'], ['service-2', 'staff-2']]);
+  assert.equal(result.appointment.price, 250);
+  assert.equal(result.appointment.depositAmount, 63);
+
+  const order = await fetch(`${baseUrl}/api/payments/order`, { method: 'POST', headers: contextHeaders, body: JSON.stringify({ reference: result.appointment.reference }) });
+  assert.equal(order.status, 200);
+  assert.equal((await order.json()).amount, 63);
+  const confirmed = await fetch(`${baseUrl}/api/payments/demo-confirm`, { method: 'POST', headers: contextHeaders, body: JSON.stringify({ reference: result.appointment.reference }) });
+  assert.equal(confirmed.status, 200);
+  assert.equal((await confirmed.json()).partySize, 2);
+
+  const lookup = await fetch(`${baseUrl}/api/booking/lookup`, { method: 'POST', headers: contextHeaders, body: JSON.stringify({ reference: result.appointment.reference, phone: '+919123456780' }) });
+  assert.equal(lookup.status, 200);
+  assert.deepEqual((await lookup.json()).guests.map((guest) => guest.serviceId), ['service-1', 'service-2']);
+
+  const rescheduled = await fetch(`${baseUrl}/api/booking/${result.appointment.reference}`, { method: 'PATCH', headers: contextHeaders, body: JSON.stringify({ action: 'reschedule', phone: '+919123456780', date: nextDate, time: '11:00' }) });
+  assert.equal(rescheduled.status, 200);
+  const updated = await rescheduled.json();
+  assert.equal(updated.date, nextDate);
+  assert.equal(updated.time, '11:00');
+  assert.deepEqual(updated.guests.map((guest) => guest.serviceId), ['service-1', 'service-2']);
+  assert.equal(new Set(updated.guests.map((guest) => guest.staffId)).size, 2);
+});
+
+test('group availability rejects assigning one stylist to two simultaneous guests', async () => {
+  const date = new Date(Date.now() + 28 * 86400000).toISOString().slice(0, 10);
+  const guests = [{ serviceId: 'service-1', staffId: 'staff-1' }, { serviceId: 'service-2', staffId: 'staff-1' }];
+  const query = new URLSearchParams({ date, guests: JSON.stringify(guests) });
+  const response = await fetch(`${baseUrl}/api/availability?${query}`, { headers: { 'x-salon-slug': 'test-salon', 'x-branch-id': 'branch-1' } });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).slots.length, 0);
+  const login = await postJson('/api/customer/login', { email: 'customer@example.com', password: 'LocalCustomerPassword123!' });
+  const { customerToken } = await login.json();
+  const booking = await fetch(`${baseUrl}/api/appointments`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-salon-slug': 'test-salon', 'x-branch-id': 'branch-1', 'x-customer-token': customerToken }, body: JSON.stringify({ guests, date, time: '10:00', depositPolicyAccepted: true }) });
+  assert.equal(booking.status, 409);
 });
 
 test('customer can find a salon time, book, pay the demo deposit, and manage the booking', async () => {

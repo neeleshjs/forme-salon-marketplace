@@ -853,6 +853,55 @@ function assignStaffForParty(state, date, time, service, partySize, preferredSta
   }
   return candidates.length >= partySize ? candidates.slice(0, partySize) : [];
 }
+function assignStaffForGuests(state, date, time, guests, excludeIds = []) {
+  const choices = guests.map((guest, index) => {
+    const service = guest.service || getService(state, guest.serviceId);
+    if (!service) return { index, service: null, candidates: [] };
+    let candidates = availableStaffForSlot(state, date, time, service, excludeIds);
+    if (guest.staffId) candidates = candidates.filter((member) => member.id === guest.staffId);
+    return { index, service, candidates };
+  });
+  if (choices.some((choice) => !choice.candidates.length)) return [];
+  const ordered = choices.slice().sort((a, b) => a.candidates.length - b.candidates.length || b.service.minutes - a.service.minutes || a.index - b.index);
+  const assignments = Array(guests.length);
+  const usedStaff = new Set();
+  function assignNext(position) {
+    if (position === ordered.length) return true;
+    const choice = ordered[position];
+    for (const member of choice.candidates) {
+      if (usedStaff.has(member.id)) continue;
+      usedStaff.add(member.id);
+      assignments[choice.index] = { guestIndex: choice.index, service: choice.service, staff: member };
+      if (assignNext(position + 1)) return true;
+      usedStaff.delete(member.id);
+      assignments[choice.index] = null;
+    }
+    return false;
+  }
+  return assignNext(0) ? assignments : [];
+}
+function normalizeBookingGuests(state, payload = {}) {
+  let requested;
+  if (Object.hasOwn(payload, 'guests')) {
+    if (!Array.isArray(payload.guests) || payload.guests.length < 1 || payload.guests.length > 4) return { error: 'Choose services for 1 to 4 people.' };
+    requested = payload.guests;
+  } else {
+    const partySize = Number(payload.partySize || 1);
+    if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) return { error: 'Choose between 1 and 4 people.' };
+    requested = Array.from({ length: partySize }, (_, index) => ({ serviceId: payload.serviceId, staffId: index === 0 ? payload.staffId || '' : '' }));
+  }
+  const guests = [];
+  for (const [index, item] of requested.entries()) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return { error: `Choose a service for person ${index + 1}.` };
+    const serviceId = typeof item.serviceId === 'string' ? item.serviceId : '';
+    const service = getService(state, serviceId);
+    const staffId = typeof item.staffId === 'string' ? item.staffId : '';
+    if (!service) return { error: `Choose a valid service for person ${index + 1}.` };
+    if (staffId && !getStaff(state, staffId)) return { error: `Choose a valid preferred stylist for person ${index + 1}.` };
+    guests.push({ serviceId, service, staffId });
+  }
+  return { guests };
+}
 function bookingGroupAppointments(state, appointment, customerUserId = appointment?.customerUserId) {
   if (!appointment) return [];
   if (!appointment.groupId) return [appointment];
@@ -1206,12 +1255,17 @@ app.get('/api/staff', async (_req, res, next) => { try { res.json((await readSta
 app.get('/api/availability', async (req, res, next) => {
   try {
     const state = await readState();
-    const service = getService(state, req.query.serviceId);
     const date = String(req.query.date || '');
-    if (!service || !validDateString(date)) return res.status(400).json({ error: 'Choose a service and valid date.' });
-    const partySize = Number(req.query.partySize || 1);
-    if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) return res.status(400).json({ error: 'Choose between 1 and 4 people.' });
-    const preferredStaffId = String(req.query.staffId || '');
+    if (!validDateString(date)) return res.status(400).json({ error: 'Choose a valid date.' });
+    let request = { serviceId: String(req.query.serviceId || ''), partySize: req.query.partySize, staffId: String(req.query.staffId || '') };
+    if (req.query.guests !== undefined) {
+      try { request.guests = JSON.parse(String(req.query.guests)); }
+      catch { return res.status(400).json({ error: 'Choose valid services for each person.' }); }
+    }
+    const normalized = normalizeBookingGuests(state, request);
+    if (normalized.error) return res.status(400).json({ error: normalized.error });
+    const guests = normalized.guests;
+    const partySize = guests.length;
     const weekday = weekdayFromDate(date);
     const slots = [];
     const open = minutes(state.settings.openingTime);
@@ -1219,10 +1273,10 @@ app.get('/api/availability', async (req, res, next) => {
     for (let start = open; start < close; start += SLOT_STEP) {
       const time = `${String(Math.floor(start / 60)).padStart(2, '0')}:${String(start % 60).padStart(2, '0')}`;
       if (wallTimeInZone(date, time, state.settings.timeZone || scopeStorage.getStore()?.branch.timeZone || 'Etc/UTC') <= new Date()) continue;
-      const staff = state.settings.openDays.includes(weekday) ? availableStaffForSlot(state, date, time, service) : [];
-      if (staff.length >= partySize && (!preferredStaffId || staff.some((member) => member.id === preferredStaffId))) slots.push({ time, staff: staff.map(({ id, name, role, color }) => ({ id, name, role, color })) });
+      const assignments = state.settings.openDays.includes(weekday) ? assignStaffForGuests(state, date, time, guests) : [];
+      if (assignments.length === partySize) slots.push({ time, staff: assignments.map(({ staff: member }) => ({ id: member.id, name: member.name, role: member.role, color: member.color })), assignments: assignments.map(({ guestIndex, service, staff: member }) => ({ guestIndex, serviceId: service.id, serviceName: service.name, staffId: member.id, staffName: member.name })) });
     }
-    res.json({ date, service, partySize, slots });
+    res.json({ date, service: guests[0].service, guests: guests.map(({ service, staffId }) => ({ serviceId: service.id, serviceName: service.name, staffId })), partySize, slots });
   } catch (e) { next(e); }
 });
 
@@ -1231,27 +1285,26 @@ app.post('/api/appointments', bookingCreateRateLimit, async (req, res, next) => 
     const scope = scopeStorage.getStore(); const customerUser = customerFromRequest(req, scope.platform);
     if (!customerUser) return res.status(401).json({ error: 'Create an account or sign in before booking.' });
     if (req.body?.depositPolicyAccepted !== true) return res.status(400).json({ error: 'Please accept the booking advance and no-show policy.' });
-    const { serviceId, staffId = '', date, time, notes = '' } = req.body || {}; const { name, phone } = customerUser;
-    const partySize = Number(req.body?.partySize || 1);
-    if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) return res.status(400).json({ error: 'Choose between 1 and 4 people.' });
+    const { date, time, notes = '' } = req.body || {}; const { name, phone } = customerUser;
     if (!validDateString(date) || !validTimeString(time)) return res.status(400).json({ error: 'Choose a valid date and available time.' });
     if (wallTimeInZone(date, time, scope.branch?.timeZone || 'Etc/UTC') <= new Date()) return res.status(400).json({ error: 'Choose a future time.' });
     const outcome = await mutateStateSafely((state) => {
       if (!validSlotStart(time, state.settings.openingTime)) return { persist: false, httpStatus: 400, error: 'Choose an available appointment time.' };
-      const service = getService(state, serviceId);
-      if (!service) return { persist: false, httpStatus: 400, error: 'Choose a valid service.' };
-      const assignedStaff = assignStaffForParty(state, date, time, service, partySize, staffId);
-      if (assignedStaff.length !== partySize) return { persist: false, httpStatus: 409, error: `That time needs ${partySize} available team member${partySize === 1 ? '' : 's'}. Please choose another time.` };
+      const normalized = normalizeBookingGuests(state, req.body || {});
+      if (normalized.error) return { persist: false, httpStatus: 400, error: normalized.error };
+      const guests = normalized.guests; const partySize = guests.length;
+      const assignments = assignStaffForGuests(state, date, time, guests);
+      if (assignments.length !== partySize) return { persist: false, httpStatus: 409, error: `That time needs ${partySize} available team member${partySize === 1 ? '' : 's'} for the selected services and stylists. Please choose another time.` };
       const customer = ensureCustomer(state, { name, phone, notes: typeof notes === 'string' ? notes.trim().slice(0, 300) : '' });
       const depositPercent = 25; const groupId = partySize > 1 ? randomUUID() : null; const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-      const appointments = assignedStaff.map((staff, index) => {
+      const appointments = assignments.map(({ service, staff }, index) => {
         const depositAmount = Math.max(1, Math.round(service.price * depositPercent / 100));
-        const appointment = { id: randomUUID(), reference: makeReference(), groupId, groupIndex: index + 1, partySize, customerId: customer.id, customerUserId: customerUser.id, customerEmail: customerUser.email, name, phone, serviceId, serviceName: service.name, minutes: service.minutes, price: service.price, staffId: staff.id, staffName: staff.name, date, time, notes: typeof notes === 'string' ? notes.trim().slice(0, 300) : '', status: 'awaiting-payment', paymentStatus: 'deposit_due', depositAmount, depositCurrency: scope.branch.currency || state.settings.currency || 'INR', depositPercent, depositForfeited: false, paymentExpiresAt: expiresAt, createdAt: new Date().toISOString() };
+        const appointment = { id: randomUUID(), reference: makeReference(), groupId, groupIndex: index + 1, partySize, customerId: customer.id, customerUserId: customerUser.id, customerEmail: customerUser.email, name, phone, serviceId: service.id, serviceName: service.name, minutes: service.minutes, price: service.price, staffId: staff.id, staffName: staff.name, date, time, notes: typeof notes === 'string' ? notes.trim().slice(0, 300) : '', status: 'awaiting-payment', paymentStatus: 'deposit_due', depositAmount, depositCurrency: scope.branch.currency || state.settings.currency || 'INR', depositPercent, depositForfeited: false, paymentExpiresAt: expiresAt, createdAt: new Date().toISOString() };
         state.appointments.push(appointment);
         return appointment;
       });
       const depositTotal = appointments.reduce((total, appointment) => total + appointment.depositAmount, 0);
-      return { appointment: { reference: appointments[0].reference, groupId, partySize, name, serviceName: service.name, staffName: appointments[0].staffName, staffNames: assignedStaff.map((member) => member.name), date, time, minutes: service.minutes, price: service.price * partySize, status: 'awaiting-payment', depositAmount: depositTotal, depositCurrency: appointments[0].depositCurrency, depositPercent }, appointments: appointments.map((appointment) => ({ reference: appointment.reference, staffName: appointment.staffName, groupIndex: appointment.groupIndex, partySize: appointment.partySize })), groupId, partySize };
+      return { appointment: { reference: appointments[0].reference, groupId, partySize, name, serviceName: partySize === 1 ? appointments[0].serviceName : `${partySize} selected services`, staffName: appointments[0].staffName, staffNames: appointments.map((item) => item.staffName), date, time, minutes: Math.max(...appointments.map((item) => item.minutes)), price: appointments.reduce((total, item) => total + item.price, 0), status: 'awaiting-payment', depositAmount: depositTotal, depositCurrency: appointments[0].depositCurrency, depositPercent }, appointments: appointments.map((appointment) => ({ reference: appointment.reference, serviceId: appointment.serviceId, serviceName: appointment.serviceName, price: appointment.price, minutes: appointment.minutes, staffId: appointment.staffId, staffName: appointment.staffName, groupIndex: appointment.groupIndex, partySize: appointment.partySize })), groupId, partySize };
     }, scope);
     if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
     res.status(201).json(outcome);
@@ -1336,7 +1389,8 @@ app.post('/api/booking/lookup', bookingLookupRateLimit, async (req, res, next) =
     const state = await readState();
     const item = state.appointments.find((a) => a.reference === String(req.body?.reference || '').toUpperCase() && a.phone === String(req.body?.phone || '').trim());
     if (!item) return res.status(404).json({ error: 'Booking reference or phone number does not match.' });
-    res.json({ reference: item.reference, name: item.name, serviceId: item.serviceId, serviceName: item.serviceName, staffId: item.staffId, staffName: item.staffName, date: item.date, time: item.time, minutes: item.minutes, price: item.price, status: item.status, partySize: item.partySize || 1 });
+    const guests = bookingGroupAppointments(state, item).sort((a, b) => (a.groupIndex || 1) - (b.groupIndex || 1)).map((appointment) => ({ reference: appointment.reference, serviceId: appointment.serviceId, serviceName: appointment.serviceName, staffId: appointment.staffId, staffName: appointment.staffName, minutes: appointment.minutes, price: appointment.price, groupIndex: appointment.groupIndex || 1 }));
+    res.json({ reference: item.reference, name: item.name, serviceId: item.serviceId, serviceName: item.serviceName, staffId: item.staffId, staffName: item.staffName, date: item.date, time: item.time, minutes: item.minutes, price: item.price, status: item.status, partySize: guests.length, guests });
   } catch (e) { next(e); }
 });
 app.patch('/api/booking/:reference', bookingManageRateLimit, async (req, res, next) => {
@@ -1351,15 +1405,19 @@ app.patch('/api/booking/:reference', bookingManageRateLimit, async (req, res, ne
         for (const appointment of group) { appointment.status = 'cancelled'; appointment.updatedAt = new Date().toISOString(); }
       } else if (req.body.action === 'reschedule') {
         if (group.some((appointment) => !['awaiting-payment', 'confirmed'].includes(appointment.status))) return { persist: false, httpStatus: 409, error: 'This booking can no longer be changed online. Contact the salon for help.' };
-        const service = getService(state, item.serviceId);
         const date = String(req.body.date || ''); const time = String(req.body.time || '');
         if (!validDateString(date) || !validSlotStart(time, state.settings.openingTime)) return { persist: false, httpStatus: 400, error: 'Choose a valid date and time.' };
-        if (!service || wallTimeInZone(date, time, state.settings.timeZone || scope.branch.timeZone || 'Etc/UTC') <= new Date()) return { persist: false, httpStatus: 409, error: 'That time is not available. Choose another slot.' };
-        const assignedStaff = assignStaffForParty(state, date, time, service, group.length, req.body.staffId || item.staffId, group.map((appointment) => appointment.id));
-        if (assignedStaff.length !== group.length) return { persist: false, httpStatus: 409, error: `That time needs ${group.length} available team member${group.length === 1 ? '' : 's'}. Choose another time.` };
-        group.forEach((appointment, index) => { appointment.date = date; appointment.time = time; appointment.staffId = assignedStaff[index].id; appointment.staffName = assignedStaff[index].name; appointment.updatedAt = new Date().toISOString(); });
+        if (wallTimeInZone(date, time, state.settings.timeZone || scope.branch.timeZone || 'Etc/UTC') <= new Date()) return { persist: false, httpStatus: 409, error: 'That time is not available. Choose another slot.' };
+        const orderedGroup = group.slice().sort((a, b) => (a.groupIndex || 1) - (b.groupIndex || 1));
+        const requests = orderedGroup.map((appointment) => ({ serviceId: appointment.serviceId, staffId: '' }));
+        const normalized = normalizeBookingGuests(state, { guests: requests });
+        if (normalized.error) return { persist: false, httpStatus: 409, error: 'A service in this booking is no longer available. Contact the salon to change it.' };
+        const assignments = assignStaffForGuests(state, date, time, normalized.guests, orderedGroup.map((appointment) => appointment.id));
+        if (assignments.length !== orderedGroup.length) return { persist: false, httpStatus: 409, error: `That time needs ${orderedGroup.length} available team member${orderedGroup.length === 1 ? '' : 's'} for these services. Choose another time.` };
+        orderedGroup.forEach((appointment, index) => { appointment.date = date; appointment.time = time; appointment.staffId = assignments[index].staff.id; appointment.staffName = assignments[index].staff.name; appointment.updatedAt = new Date().toISOString(); });
       } else return { persist: false, httpStatus: 400, error: 'Choose reschedule or cancel.' };
-      return { reference: item.reference, status: item.status, date: item.date, time: item.time, staffName: item.staffName, partySize: group.length, references: group.map((appointment) => appointment.reference), staffNames: group.map((appointment) => appointment.staffName) };
+      const orderedGroup = group.slice().sort((a, b) => (a.groupIndex || 1) - (b.groupIndex || 1));
+      return { reference: item.reference, status: item.status, date: item.date, time: item.time, staffName: item.staffName, partySize: group.length, references: orderedGroup.map((appointment) => appointment.reference), staffNames: orderedGroup.map((appointment) => appointment.staffName), guests: orderedGroup.map((appointment) => ({ reference: appointment.reference, serviceId: appointment.serviceId, serviceName: appointment.serviceName, staffId: appointment.staffId, staffName: appointment.staffName, minutes: appointment.minutes, price: appointment.price, groupIndex: appointment.groupIndex || 1 })) };
     }, scope);
     if (outcome.httpStatus) return res.status(outcome.httpStatus).json({ error: outcome.error });
     res.json(outcome);

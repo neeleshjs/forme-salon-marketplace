@@ -18,6 +18,7 @@ let publicContext = { salon: new URLSearchParams(location.search).get('salon') |
 let services = [];
 let staff = [];
 let availability = [];
+let availabilityRequestId = 0;
 let adminData = { products: [], customers: [], staff: [], services: [] };
 let partnerCategories = [];
 let partnerCategoryLoadPromise = null;
@@ -212,6 +213,22 @@ function statusLabel(status) { const labels = { 'in-service': 'Service in progre
 function statusBadge(status) { return `<span class="status-pill ${escapeHtml(status)}">${escapeHtml(statusLabel(status))}</span>`; }
 
 function setDateMin(input) { if (input) input.min = localDate(); }
+function collectBookingGuests() {
+  return $$('.guest-booking-card', $('#guestBookingChoices')).map((card) => ({ serviceId: $('.guest-service-select', card).value, staffId: $('.guest-staff-select', card).value }));
+}
+function renderGuestBookingChoices({ preserve = true } = {}) {
+  const container = $('#guestBookingChoices');
+  if (!container) return;
+  const previous = preserve ? collectBookingGuests() : [];
+  const count = Math.max(1, Math.min(4, Number($('#partySizeSelect').value || 1)));
+  const serviceOptions = '<option value="">Choose a service</option>' + services.map((service) => `<option value="${escapeHtml(service.id)}">${escapeHtml(service.name)} — ${service.minutes} min · ${money(service.price)}</option>`).join('');
+  const staffOptions = '<option value="">Any available stylist</option>' + staff.map((member) => `<option value="${escapeHtml(member.id)}">${escapeHtml(member.name)} · ${escapeHtml(member.role)}</option>`).join('');
+  container.innerHTML = Array.from({ length: count }, (_, index) => `<fieldset class="guest-booking-card"><legend>Person ${index + 1}</legend><label>Service<select class="guest-service-select" required>${serviceOptions}</select></label><label>Preferred stylist <span class="optional">OPTIONAL</span><select class="guest-staff-select">${staffOptions}</select></label></fieldset>`).join('');
+  $$('.guest-booking-card', container).forEach((card, index) => {
+    if (previous[index]?.serviceId && services.some((service) => service.id === previous[index].serviceId)) $('.guest-service-select', card).value = previous[index].serviceId;
+    if (previous[index]?.staffId && staff.some((member) => member.id === previous[index].staffId)) $('.guest-staff-select', card).value = previous[index].staffId;
+  });
+}
 async function loadPublicData() {
   try {
     const [profile, serviceList, staffList, ratingData] = await Promise.all([api('/api/salon/profile'), api('/api/services'), api('/api/staff'), api('/api/reviews')]);
@@ -220,8 +237,7 @@ async function loadPublicData() {
     $('#salonExperience').hidden = false; document.title = `${profile.tenantName} - ${profile.branch.name} - FORME`; $('#manageBookingLink').href = `/manage-booking?salon=${encodeURIComponent(publicContext.salon)}&branch=${encodeURIComponent(profile.branch.id)}`; $('.hero-copy .button').href = `/salon/${encodeURIComponent(publicContext.salon)}/booking?branch=${encodeURIComponent(profile.branch.id)}`;
     $('#dateInput').value = localDate(); $('#manageDate').value = localDate();
     $('#serviceGrid').innerHTML = services.map((s, i) => `<article class="service-card"><span class="service-number">0${i + 1} / ${s.minutes} MIN</span><h3>${escapeHtml(s.name)}</h3><p>${escapeHtml(s.description)}</p><div class="service-bottom"><strong>${money(s.price)}</strong><span>${escapeHtml(s.category)}</span></div></article>`).join('');
-    $('#serviceSelect').innerHTML = '<option value="">Choose a service</option>' + services.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)} — ${s.minutes} min · ${money(s.price)}</option>`).join('');
-    $('#staffSelect').innerHTML = '<option value="">Any available barber</option>' + staff.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)} · ${escapeHtml(s.role)}</option>`).join('');
+    renderGuestBookingChoices({ preserve: false });
   } catch (error) {
     if (error.message === 'Salon location not found.') { navigate('/not-found', { replace: true }); return; }
     $('#serviceGrid').innerHTML = `<p class="loading">${escapeHtml(error.message)}</p>`;
@@ -229,45 +245,49 @@ async function loadPublicData() {
 }
 
 async function refreshAvailableTimes({ preserve = false } = {}) {
-  const serviceId = $('#serviceSelect').value;
+  const guests = collectBookingGuests();
   const date = $('#dateInput').value;
-  const partySize = Number($('#partySizeSelect').value || 1);
+  const partySize = guests.length;
   const select = $('#timeSelect');
   const previous = preserve ? select.value : '';
-  if (!serviceId || !date) { select.innerHTML = '<option value="">Choose service and date first</option>'; availability = []; return; }
+  const requestId = ++availabilityRequestId;
+  if (!date || !guests.length || guests.some((guest) => !guest.serviceId)) { select.innerHTML = '<option value="">Choose each person\'s service first</option>'; select.disabled = false; availability = []; return; }
   select.innerHTML = '<option value="">Checking the schedule…</option>';
   select.disabled = true;
   try {
-    const result = await api(`/api/availability?serviceId=${encodeURIComponent(serviceId)}&date=${encodeURIComponent(date)}&partySize=${partySize}&staffId=${encodeURIComponent($('#staffSelect').value)}`);
+    const query = new URLSearchParams({ date, guests: JSON.stringify(guests) });
+    const result = await api(`/api/availability?${query}`);
+    if (requestId !== availabilityRequestId) return;
     availability = result.slots;
-    const barberId = $('#staffSelect').value;
-    const choices = availability.filter((slot) => !barberId || slot.staff.some((person) => person.id === barberId));
-    select.innerHTML = choices.length ? '<option value="">Select an available time</option>' + choices.map((slot) => `<option value="${slot.time}">${displayTime(slot.time)} - ${slot.staff.length} team member${slot.staff.length === 1 ? '' : 's'} available</option>`).join('') : `<option value="">No time has ${partySize} available team member${partySize === 1 ? '' : 's'}. Try another date.</option>`;
+    const choices = availability;
+    select.innerHTML = choices.length ? '<option value="">Select an available time</option>' + choices.map((slot) => {
+      const assignmentCopy = (slot.assignments || []).map((item) => `Person ${item.guestIndex + 1}: ${item.serviceName} with ${item.staffName}`).join(' · ');
+      return `<option value="${slot.time}">${displayTime(slot.time)} · ${assignmentCopy}</option>`;
+    }).join('') : `<option value="">No time fits all ${partySize} selected service${partySize === 1 ? '' : 's'} and stylists. Try another date or choose “Any available stylist”.</option>`;
     if (choices.some((slot) => slot.time === previous)) select.value = previous;
-  } catch (error) { select.innerHTML = `<option value="">${escapeHtml(error.message)}</option>`; }
-  finally { select.disabled = false; }
+  } catch (error) { if (requestId === availabilityRequestId) select.innerHTML = `<option value="">${escapeHtml(error.message)}</option>`; }
+  finally { if (requestId === availabilityRequestId) select.disabled = false; }
 }
 
 $('#dateInput').value = localDate();
 $('#manageDate').value = localDate();
 setDateMin($('#dateInput')); setDateMin($('#manageDate'));
-$('#serviceSelect').addEventListener('change', () => refreshAvailableTimes());
 $('#dateInput').addEventListener('change', () => refreshAvailableTimes());
-$('#staffSelect').addEventListener('change', () => refreshAvailableTimes());
-$('#partySizeSelect').addEventListener('change', () => refreshAvailableTimes());
+$('#guestBookingChoices').addEventListener('change', () => refreshAvailableTimes());
+$('#partySizeSelect').addEventListener('change', () => { renderGuestBookingChoices(); refreshAvailableTimes(); });
 
 let pendingDeposit = null;
 $('#bookingForm').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget;
   if (!sessionStorage.getItem('salonCustomerToken')) { showMessage($('#customerAuthMessage'), 'Sign in or create an account before booking.', true); $('#customerAuthPanel').scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
-  const data = Object.fromEntries(new FormData(form)); data.depositPolicyAccepted = data.depositPolicyAccepted === 'on';
+  const data = Object.fromEntries(new FormData(form)); data.depositPolicyAccepted = data.depositPolicyAccepted === 'on'; data.guests = collectBookingGuests(); delete data.partySize;
   showMessage($('#bookingMessage'), 'Holding your selected time. Please wait...');
   try {
     const result = await api('/api/appointments', { method: 'POST', body: JSON.stringify(data) }); const appointment = result.appointment;
     const payment = await api('/api/payments/order', { method: 'POST', body: JSON.stringify({ reference: appointment.reference }) }); pendingDeposit = { ...payment, partySize: result.partySize || 1 };
     $('#depositCheckout').hidden = false; $('#depositAmountLabel').textContent = money(appointment.depositAmount); $('#depositModeNote').textContent = payment.mode === 'demo' ? 'Test payment only. No real money will be taken.' : 'Online payment secured by Razorpay.'; $('#payDepositButton').textContent = payment.mode === 'demo' ? 'Complete demo payment' : 'Pay advance online';
-    const people = result.partySize || 1; const assignedNames = (result.appointments || []).map((person) => person.staffName).join(', '); const groupCopy = people > 1 ? ` for ${people} people, with a different team member assigned to each${assignedNames ? ` (${assignedNames})` : ''}` : ` with ${appointment.staffName}`; const references = (result.appointments || []).map((person) => person.reference).join(', ');
-    showMessage($('#bookingMessage'), `Your time is held for 15 minutes: ${appointment.serviceName}${groupCopy} on ${displayDate(appointment.date)} at ${displayTime(appointment.time)}. Pay the total ${appointment.depositPercent}% booking advance to confirm. ${people > 1 ? `Booking references: ${references}.` : `Reference: ${appointment.reference}.`}`);
+    const people = result.partySize || 1; const references = (result.appointments || []).map((person) => person.reference).join(', '); const guestCopy = (result.appointments || []).map((person, index) => `Person ${index + 1}: ${person.serviceName} with ${person.staffName}`).join('; ');
+    showMessage($('#bookingMessage'), `Your time is held for 15 minutes on ${displayDate(appointment.date)} at ${displayTime(appointment.time)}. ${guestCopy}. Pay the total ${appointment.depositPercent}% booking advance (${money(appointment.depositAmount)}) to confirm. ${people > 1 ? `Booking references: ${references}.` : `Reference: ${appointment.reference}.`}`);
     loadMyBookings().catch(()=>{});
   } catch (error) { showMessage($('#bookingMessage'), error.message, true); }
 });
@@ -283,6 +303,15 @@ $('#payDepositButton').addEventListener('click', async () => {
   } catch (error) { showMessage($('#bookingMessage'), error.message || 'The payment page did not open. Please try again.', true); }
 });
 
+function bookingGuestRequests(booking) {
+  if (Array.isArray(booking.guests) && booking.guests.length) return booking.guests.map((guest) => ({ serviceId: guest.serviceId, staffId: '' }));
+  return [{ serviceId: booking.serviceId, staffId: '' }];
+}
+async function availableSlotsForBooking(booking, date) {
+  const query = new URLSearchParams({ date, guests: JSON.stringify(bookingGuestRequests(booking)) });
+  return api(`/api/availability?${query}`);
+}
+
 $('#manageForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -293,10 +322,10 @@ $('#manageForm').addEventListener('submit', async (event) => {
     const booking = await api('/api/booking/lookup', { method: 'POST', body: JSON.stringify({ reference: data.reference.trim(), phone: data.phone.trim() }) });
     if (action === 'reschedule') {
       if (!data.date || !data.time) throw new Error('Choose a new date and available time first.');
-      const open = await api(`/api/availability?serviceId=${encodeURIComponent(booking.serviceId)}&date=${encodeURIComponent(data.date)}&partySize=${booking.partySize || 1}`);
+      const open = await availableSlotsForBooking(booking, data.date);
       const slot = open.slots.find((s) => s.time === data.time);
       if (!slot) throw new Error('That time is no longer available. Choose another time.');
-      const updated = await api(`/api/booking/${encodeURIComponent(booking.reference)}`, { method: 'PATCH', body: JSON.stringify({ action, phone: data.phone.trim(), date: data.date, time: data.time, staffId: slot.staff[0]?.id }) });
+      const updated = await api(`/api/booking/${encodeURIComponent(booking.reference)}`, { method: 'PATCH', body: JSON.stringify({ action, phone: data.phone.trim(), date: data.date, time: data.time }) });
       showMessage($('#manageMessage'), `Booking${updated.partySize > 1 ? ` for ${updated.partySize} people` : ''} is now on ${displayDate(updated.date)} at ${displayTime(updated.time)}${updated.staffNames?.length ? ` with ${updated.staffNames.join(', ')}` : ` with ${updated.staffName}`}.`);
     } else {
       const updated = await api(`/api/booking/${encodeURIComponent(booking.reference)}`, { method: 'PATCH', body: JSON.stringify({ action, phone: data.phone.trim() }) });
@@ -310,8 +339,11 @@ $('#manageDate').addEventListener('change', async () => {
   if (!reference || !phone) { $('#manageTime').innerHTML = '<option value="">Enter reference and phone first</option>'; return; }
   try {
     const booking = await api('/api/booking/lookup', { method: 'POST', body: JSON.stringify({ reference, phone }) });
-    const data = await api(`/api/availability?serviceId=${encodeURIComponent(booking.serviceId)}&date=${encodeURIComponent($('#manageDate').value)}&partySize=${booking.partySize || 1}`);
-    $('#manageTime').innerHTML = data.slots.length ? data.slots.map((slot) => `<option value="${slot.time}">${displayTime(slot.time)} - ${slot.staff.length} team members available</option>`).join('') : '<option value="">No open time on this date</option>';
+    const data = await availableSlotsForBooking(booking, $('#manageDate').value);
+    $('#manageTime').innerHTML = data.slots.length ? '<option value="">Select an available time</option>' + data.slots.map((slot) => {
+      const assignmentCopy = (slot.assignments || []).map((item) => `Person ${item.guestIndex + 1}: ${item.serviceName} with ${item.staffName}`).join(' · ');
+      return `<option value="${slot.time}">${displayTime(slot.time)} · ${assignmentCopy}</option>`;
+    }).join('') : '<option value="">No time fits every service on this date</option>';
   } catch (error) { $('#manageTime').innerHTML = `<option value="">${escapeHtml(error.message)}</option>`; }
 });
 
