@@ -428,6 +428,41 @@ test('parallel inventory updates are preserved and supplier deliveries are appli
   assert.equal(inventory.find((item) => item.id === product.id).stock, 16);
 });
 
+test('partner sales reports and salon settings survive incomplete legacy records', async () => {
+  const token = await partnerWorkspaceToken();
+  const branchPath = path.join(tempDir, 'tenants', 'salon-1', 'branch-1.json');
+  const state = JSON.parse(await readFile(branchPath, 'utf8'));
+  state.settings.timeZone = 'Invalid/Legacy-Timezone';
+  state.orders = [
+    { id: 'legacy-order-without-date', receipt: 'FM-LEGACY', total: 80, paymentMethod: null, items: null },
+    { id: 'valid-order', receipt: 'FM-CURRENT', createdAt: new Date().toISOString(), total: '250', paymentMethod: 'upi', items: [null, { type: 'service', name: 'Haircut', unitPrice: 100, quantity: 2 }] },
+  ];
+  state.products = [null, { id: 'low-stock-product', active: true, stock: 1, lowStockAt: 2 }];
+  await writeFile(branchPath, JSON.stringify(state));
+
+  const [analyticsResponse, overviewResponse, ordersResponse, portfolioResponse, settingsResponse, servicesResponse] = await Promise.all([
+    adminRequest('/api/admin/analytics', token),
+    adminRequest('/api/admin/overview', token),
+    adminRequest('/api/admin/orders', token),
+    adminRequest('/api/admin/portfolio', token),
+    adminRequest('/api/admin/settings', token),
+    adminRequest('/api/admin/services', token),
+  ]);
+  for (const response of [analyticsResponse, overviewResponse, ordersResponse, portfolioResponse, settingsResponse, servicesResponse]) assert.equal(response.status, 200);
+  const analytics = await analyticsResponse.json();
+  assert.equal(analytics.monthRevenue, 250);
+  assert.equal(analytics.monthOrders, 1);
+  assert.equal(analytics.serviceSales[0].revenue, 200);
+  const overview = await overviewResponse.json();
+  assert.equal(overview.monthRevenue, 250);
+  const portfolio = await portfolioResponse.json();
+  assert.equal(portfolio.branches[0].monthRevenue, 250);
+  assert.equal(portfolio.lowStock, 1);
+  assert.equal((await settingsResponse.json()).businessName, 'Test Salon');
+  assert.ok(Array.isArray(await servicesResponse.json()));
+  assert.equal((await ordersResponse.json()).length, 2);
+});
+
 test('inactive partner accounts lose old sessions and cannot sign in again', async () => {
   const login = await postJson('/api/auth/login', { email: 'owner@example.com', password: 'LocalTestPassword123!' });
   assert.equal(login.status, 200);

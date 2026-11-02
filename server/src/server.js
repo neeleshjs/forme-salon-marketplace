@@ -102,6 +102,18 @@ const initialState = (overrides = {}) => {
   });
 };
 
+const stateCollections = ['services', 'staff', 'appointments', 'eventReservations', 'customers', 'orders', 'purchaseOrders', 'reviews', 'paymentRecords', 'products', 'movements'];
+function normalizeStateDocument(stored, overrides = {}) {
+  const base = initialState(overrides);
+  if (Array.isArray(stored)) return { ...base, appointments: stored.filter((row) => row && typeof row === 'object' && !Array.isArray(row)) };
+  const source = stored && typeof stored === 'object' ? stored : {};
+  const state = { ...base, ...source, settings: { ...base.settings, ...(source.settings && typeof source.settings === 'object' && !Array.isArray(source.settings) ? source.settings : {}) } };
+  for (const key of stateCollections) {
+    state[key] = Array.isArray(state[key]) ? state[key].filter((row) => row && typeof row === 'object' && !Array.isArray(row)) : [];
+  }
+  return state;
+}
+
 function stateDocumentKey(scope) {
   if (!scope || scope.branch?.isDefault) return 'studio:default';
   return `studio:${scope.tenant.id}:${scope.branch.id}`;
@@ -215,16 +227,12 @@ async function readStateFor(scope) {
   const key = stateDocumentKey(scope);
   if (databasePool) {
     const stored = await readDocument(key) ?? await createDocumentIfMissing(key, initialState(overrides));
-    if (Array.isArray(stored)) return { ...initialState(overrides), appointments: stored };
-    const base = initialState(overrides);
-    return { ...base, ...stored, settings: { ...base.settings, ...(stored.settings || {}) } };
+    return normalizeStateDocument(stored, overrides);
   }
   const file = pathForScope(scope);
   try {
     const stored = JSON.parse(await fs.readFile(file, 'utf8'));
-    if (Array.isArray(stored)) return { ...initialState(overrides), appointments: stored };
-    const base = initialState(overrides);
-    return { ...base, ...stored, settings: { ...base.settings, ...(stored.settings || {}) } };
+    return normalizeStateDocument(stored, overrides);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
     const state = initialState(overrides);
@@ -256,8 +264,7 @@ async function mutateStateSafely(mutator, scope = scopeStorage.getStore()) {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key]);
       const { rows } = await client.query('SELECT payload FROM forme_documents WHERE document_key = $1 FOR UPDATE', [key]);
       const stored = rows[0]?.payload;
-      const base = initialState(overrides);
-      const state = Array.isArray(stored) ? { ...base, appointments: stored } : { ...base, ...(stored || {}), settings: { ...base.settings, ...(stored?.settings || {}) } };
+      const state = normalizeStateDocument(stored, overrides);
       const result = await mutator(state, { client, scope });
       if (result?.persist !== false) {
         await client.query(`INSERT INTO forme_documents (document_key, payload) VALUES ($1, $2::jsonb)
@@ -592,6 +599,29 @@ function validSlotStart(value, openingTime) {
 }
 function priceFactor(currency) { return ({ INR: 1, USD: 0.12, EUR: 0.11, GBP: 0.095, AED: 0.44, SGD: 0.16, CAD: 0.17, AUD: 0.18 })[currency] || 0.1; }
 function dateKeyInZone(value = new Date(), timeZone = 'Etc/UTC') { const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(value); const p = Object.fromEntries(parts.map((x) => [x.type, x.value])); return `${p.year}-${p.month}-${p.day}`; }
+function safeTimeZone(value, fallback = 'Etc/UTC') {
+  for (const candidate of [value, fallback, 'Etc/UTC']) {
+    if (typeof candidate !== 'string' || !candidate.trim()) continue;
+    try { new Intl.DateTimeFormat('en', { timeZone: candidate }).format(); return candidate; } catch {}
+  }
+  return 'Etc/UTC';
+}
+function orderTimestamp(order) {
+  const value = order?.createdAt ?? order?.created_at;
+  if (typeof value !== 'string' && typeof value !== 'number' && !(value instanceof Date)) return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+function orderAmount(order) {
+  const amount = Number(order?.total);
+  return Number.isFinite(amount) && amount >= 0 ? amount : 0;
+}
+function validOrdersForMonth(orders, month, timeZone) {
+  return orders.filter((order) => {
+    const timestamp = orderTimestamp(order);
+    return timestamp !== null && dateKeyInZone(timestamp, timeZone).startsWith(month);
+  });
+}
 function wallTimeInZone(date, time, timeZone) {
   const [year, month, day] = date.split('-').map(Number); const [hour, minute] = time.split(':').map(Number);
   const target = Date.UTC(year, month - 1, day, hour, minute); let guess = target;
@@ -1372,9 +1402,9 @@ app.get('/api/admin/portfolio', async (_req, res, next) => {
   try {
     const { tenant } = scopeStorage.getStore(); const branches = [];
     for (const branch of tenant.branches.filter((b) => b.active)) {
-      const state = await readStateFor({ tenant, branch }); const zone = state.settings.timeZone || branch.timeZone || 'Etc/UTC'; const today = todayInZone(zone); const month = today.slice(0, 7);
+      const state = await readStateFor({ tenant, branch }); const zone = safeTimeZone(state.settings.timeZone || branch.timeZone); const today = todayInZone(zone); const month = today.slice(0, 7);
       const upcoming = state.appointments.filter((a) => a.date >= today && !['cancelled', 'completed', 'no-show'].includes(a.status)).length;
-      const monthRevenue = state.orders.filter((o) => dateKeyInZone(o.createdAt, zone).startsWith(month)).reduce((sum, o) => sum + o.total, 0);
+      const monthRevenue = validOrdersForMonth(state.orders, month, zone).reduce((sum, order) => sum + orderAmount(order), 0);
       const lowStock = state.products.filter((p) => p.active && p.stock <= p.lowStockAt).length;
       branches.push({ id: branch.id, name: branch.name, city: branch.city, country: branch.country, currency: branch.currency, timeZone: branch.timeZone, hasMapPin: Number.isFinite(branch.latitude) && Number.isFinite(branch.longitude), upcoming, monthRevenue, lowStock, customers: state.customers.length });
     }
@@ -1384,11 +1414,11 @@ app.get('/api/admin/portfolio', async (_req, res, next) => {
 app.get('/api/admin/overview', async (_req, res, next) => {
   try {
     const s = await readState();
-    const today = todayInZone(s.settings.timeZone || scopeStorage.getStore()?.branch.timeZone || 'Etc/UTC');
+    const today = todayInZone(safeTimeZone(s.settings.timeZone || scopeStorage.getStore()?.branch.timeZone));
     const todayAppointments = s.appointments.filter((a) => a.date === today && a.status !== 'cancelled');
     const month = today.slice(0, 7);
-    const monthOrders = s.orders.filter((o) => o.createdAt.startsWith(month));
-    const revenue = monthOrders.reduce((sum, o) => sum + o.total, 0);
+    const monthOrders = validOrdersForMonth(s.orders, month, safeTimeZone(s.settings.timeZone || scopeStorage.getStore()?.branch.timeZone));
+    const revenue = monthOrders.reduce((sum, order) => sum + orderAmount(order), 0);
     res.json({ today: todayAppointments.length, upcoming: s.appointments.filter((a) => a.date >= today && !['cancelled', 'completed', 'no-show'].includes(a.status)).length, customers: s.customers.length, monthRevenue: revenue, lowStock: s.products.filter((p) => p.active && p.stock <= p.lowStockAt).length, appointments: todayAppointments });
   } catch (e) { next(e); }
 });
@@ -1607,10 +1637,24 @@ app.post('/api/admin/orders', async (req, res, next) => {
 });
 app.get('/api/admin/analytics', async (_req, res, next) => {
   try {
-    const s = await readState(); const zone = s.settings.timeZone || scopeStorage.getStore()?.branch.timeZone || 'Etc/UTC'; const month = todayInZone(zone).slice(0, 7); const orders = s.orders.filter((o) => dateKeyInZone(o.createdAt, zone).startsWith(month));
-    const daily = Array.from({ length: 7 }, (_, i) => { const d = wallTimeInZone(todayInZone(zone), '12:00', zone); d.setUTCDate(d.getUTCDate() - (6 - i)); const key = dateKeyInZone(d, zone); return { date: key, revenue: s.orders.filter((o) => dateKeyInZone(o.createdAt, zone) === key).reduce((n, o) => n + o.total, 0), orders: s.orders.filter((o) => dateKeyInZone(o.createdAt, zone) === key).length }; });
-    const serviceSales = {}; for (const o of s.orders) for (const l of o.items) if (l.type === 'service') serviceSales[l.name] = (serviceSales[l.name] || 0) + l.lineTotal;
-    res.json({ monthRevenue: orders.reduce((n, o) => n + o.total, 0), monthOrders: orders.length, averageTicket: orders.length ? Math.round(orders.reduce((n, o) => n + o.total, 0) / orders.length) : 0, totalCustomers: s.customers.length, daily, serviceSales: Object.entries(serviceSales).map(([name, revenue]) => ({ name, revenue })).sort((a, b) => b.revenue - a.revenue), movements: s.movements.slice(-10).reverse() });
+    const s = await readState(); const zone = safeTimeZone(s.settings.timeZone || scopeStorage.getStore()?.branch.timeZone); const today = todayInZone(zone); const month = today.slice(0, 7);
+    const datedOrders = s.orders.map((order) => ({ order, timestamp: orderTimestamp(order) })).filter((entry) => entry.timestamp);
+    const monthOrders = datedOrders.filter(({ timestamp }) => dateKeyInZone(timestamp, zone).startsWith(month)).map(({ order }) => order);
+    const dailyTotals = new Map();
+    for (const { order, timestamp } of datedOrders) {
+      const date = dateKeyInZone(timestamp, zone); const totals = dailyTotals.get(date) || { revenue: 0, orders: 0 };
+      totals.revenue += orderAmount(order); totals.orders += 1; dailyTotals.set(date, totals);
+    }
+    const daily = Array.from({ length: 7 }, (_, i) => { const date = wallTimeInZone(today, '12:00', zone); date.setUTCDate(date.getUTCDate() - (6 - i)); const key = dateKeyInZone(date, zone); const totals = dailyTotals.get(key) || { revenue: 0, orders: 0 }; return { date: key, ...totals }; });
+    const serviceSales = {};
+    for (const order of s.orders) for (const line of (Array.isArray(order.items) ? order.items : [])) {
+      if (line?.type !== 'service' || typeof line.name !== 'string' || !line.name.trim()) continue;
+      const lineTotal = Number(line.lineTotal); const fallbackTotal = Number(line.unitPrice) * Number(line.quantity || 1);
+      const revenue = Number.isFinite(lineTotal) && lineTotal >= 0 ? lineTotal : Number.isFinite(fallbackTotal) && fallbackTotal >= 0 ? fallbackTotal : 0;
+      serviceSales[line.name] = (serviceSales[line.name] || 0) + revenue;
+    }
+    const monthRevenue = monthOrders.reduce((sum, order) => sum + orderAmount(order), 0);
+    res.json({ monthRevenue, monthOrders: monthOrders.length, averageTicket: monthOrders.length ? Math.round(monthRevenue / monthOrders.length) : 0, totalCustomers: s.customers.length, daily, serviceSales: Object.entries(serviceSales).map(([name, revenue]) => ({ name, revenue })).sort((a, b) => b.revenue - a.revenue), movements: s.movements.slice(-10).reverse() });
   } catch (e) { next(e); }
 });
 app.get('/api/admin/settings', async (_req, res, next) => { try { res.json((await readState()).settings); } catch (e) { next(e); } });
